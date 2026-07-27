@@ -1,6 +1,6 @@
 [package]
 name = "cefdetector"
-version = "0.2.5"
+version = "0.3.0"
 description = "Check how many CEFs are on your Linux."
 authors = ["Origuchi"]
 license = "MIT"
