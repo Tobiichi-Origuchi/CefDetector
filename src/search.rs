@@ -414,6 +414,10 @@ fn is_shared_library(file_name: &str) -> bool {
         || file_name.contains(".so.")
 }
 
+fn is_relevant_shared_library(file_name: &str) -> bool {
+    file_name.contains("cef") || file_name == "nw.dll" || file_name.starts_with("libnw.")
+}
+
 fn is_unwanted_executable(file_name: &str) -> bool {
     file_name.contains("unins")
         || file_name.contains("setup")
@@ -504,6 +508,12 @@ fn inspect_directory(dir: &Path, flavor: ScanFlavor) -> DirectoryInspection {
         if matches!(flavor, ScanFlavor::Mini) && is_shared {
             // The N-API marker exists in ordinary libnode builds. Only an
             // application executable containing it is a useful MiniElectron lead.
+            continue;
+        }
+        if matches!(flavor, ScanFlavor::Standard)
+            && is_shared
+            && !is_relevant_shared_library(&file_name)
+        {
             continue;
         }
 
@@ -721,7 +731,7 @@ mod tests {
 
     use super::{
         AppKind, CandidateKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, classify_candidate_name,
-        scan_signature_reader,
+        is_relevant_shared_library, scan_signature_reader,
     };
 
     #[test]
@@ -740,6 +750,15 @@ mod tests {
         );
         assert_eq!(classify_candidate_name("libcefdetector.rmeta"), None);
         assert_eq!(classify_candidate_name("libnode_helpers.so"), None);
+    }
+
+    #[test]
+    fn only_framework_shared_libraries_need_signature_scanning() {
+        assert!(is_relevant_shared_library("libcef.so"));
+        assert!(is_relevant_shared_library("cefsharp.core.dll"));
+        assert!(is_relevant_shared_library("libnw.so"));
+        assert!(!is_relevant_shared_library("libvulkan.so"));
+        assert!(!is_relevant_shared_library("steamclient.dll"));
     }
 
     #[test]
