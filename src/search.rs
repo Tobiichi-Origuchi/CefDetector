@@ -19,10 +19,8 @@ fn match_file_patterns(name: &str) -> (bool, bool, bool) {
 pub fn open_path(path: String, is_dir: bool) {
     if path.contains("://") || is_dir {
         let _ = Command::new("xdg-open").arg(path).spawn();
-    } else {
-        if let Some(p) = Path::new(&path).parent() {
-            let _ = Command::new("xdg-open").arg(p).spawn();
-        }
+    } else if let Some(p) = Path::new(&path).parent() {
+        let _ = Command::new("xdg-open").arg(p).spawn();
     }
 }
 
