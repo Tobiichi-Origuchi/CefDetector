@@ -70,19 +70,26 @@ node_modules
 
 ## Benchmark
 
+`benchmark.sh` 不依赖 `psrecord`、`hyperfine` 或 GNU `time`。它会先构建锁定依赖的 release
+版本，预热文件系统缓存，再通过 Linux `/proc` 采样主进程及其子进程的峰值 RSS，原始结果保存为
+CSV。
+
+测试完整的 CLI 搜索（默认预热 1 次、正式运行 5 次）：
+
 ```bash
-$ hyperfine -w 5 -r 10 "./target/release/cefdetector -T" "./target/release/cefdetector -J" "./target/release/cefdetector -C"
-Benchmark 1: ./target/release/cefdetector -T
-  Time (mean ± σ):     478.6 ms ±  13.3 ms    [User: 1598.4 ms, System: 1473.7 ms]
-  Range (min … max):   459.9 ms … 503.2 ms    10 runs
+./benchmark.sh scan
+```
 
-Benchmark 2: ./target/release/cefdetector -J
-  Time (mean ± σ):     484.0 ms ±  12.4 ms    [User: 1621.7 ms, System: 1489.3 ms]
-  Range (min … max):   462.1 ms … 499.3 ms    10 runs
+测试 GUI 在指定时间内的内存占用：
 
-Benchmark 3: ./target/release/cefdetector -C
-  Time (mean ± σ):     478.7 ms ±   9.0 ms    [User: 1605.8 ms, System: 1468.9 ms]
-  Range (min … max):   470.4 ms … 499.1 ms    10 runs
+```bash
+./benchmark.sh gui --duration 10 --output gui-benchmark.csv
+```
+
+复用已经构建的二进制并调整运行次数：
+
+```bash
+./benchmark.sh scan --no-build --warmup 2 --runs 10
 ```
 
 ## 作者
