@@ -1,14 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Clone)]
 pub enum RawIcon {
-    Svg(Vec<u8>),
-    PngOrIco(Vec<u8>),
+    Svg(Arc<[u8]>),
+    PngOrIco(Arc<[u8]>),
     Empty,
 }
+
+static DEFAULT_ICON: LazyLock<RawIcon> = LazyLock::new(|| {
+    RawIcon::PngOrIco(Arc::from(
+        include_bytes!("../icons/default_cef_icon.ico").as_slice(),
+    ))
+});
 
 static RAW_ICON_CACHE: LazyLock<Mutex<HashMap<PathBuf, RawIcon>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -16,18 +22,17 @@ static RAW_ICON_CACHE: LazyLock<Mutex<HashMap<PathBuf, RawIcon>>> =
 static DESKTOP_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static DESKTOP_INDEX: LazyLock<Mutex<Option<HashMap<String, String>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
 static ICON_THEME_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static NEIGHBOR_ICON_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub fn read_file_bytes(path: &Path) -> Option<Vec<u8>> {
-    fs::read(path).ok()
-}
-
 fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
-    let bytes = read_file_bytes(path)?;
+    let bytes: Arc<[u8]> = fs::read(path).ok()?.into();
     let is_svg = path
         .extension()
         .and_then(|e| e.to_str())
@@ -154,56 +159,174 @@ pub fn find_icon_via_desktop_file(exe_path: &Path) -> Option<PathBuf> {
         return cached.clone();
     }
 
-    let exe_name = exe_path.file_name()?.to_string_lossy().to_string();
+    let exe_name = exe_path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let icon = {
+        let mut index = DESKTOP_INDEX.lock().unwrap();
+        let index = index.get_or_insert_with(build_desktop_index);
+        index.get(&exe_name).cloned()
+    };
 
-    let result = (|| {
-        let mut search_dirs = vec![
-            "/usr/share/applications".to_string(),
-            "/var/lib/flatpak/exports/share/applications".to_string(),
-        ];
-        if let Ok(home) = std::env::var("HOME") {
-            search_dirs.push(format!("{}/.local/share/applications", home));
+    let result = icon.and_then(|icon| {
+        if icon.starts_with('/') {
+            let path = PathBuf::from(icon);
+            path.is_file().then_some(path)
+        } else {
+            find_icon_in_theme(&icon)
         }
-
-        for dir in search_dirs {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "desktop")
-                        && let Ok(content) = fs::read_to_string(&path)
-                    {
-                        let mut has_exec = false;
-                        let mut icon_val = None;
-                        for line in content.lines() {
-                            if line.starts_with("Exec=") && line.contains(&exe_name) {
-                                has_exec = true;
-                            }
-                            if line.starts_with("Icon=") {
-                                icon_val = Some(line.trim_start_matches("Icon=").to_string());
-                            }
-                        }
-                        if has_exec && let Some(icon) = icon_val {
-                            if icon.starts_with('/') {
-                                let p = PathBuf::from(icon);
-                                if p.exists() {
-                                    return Some(p);
-                                }
-                            } else if let Some(p) = find_icon_in_theme(&icon) {
-                                return Some(p);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    })();
+    });
 
     DESKTOP_CACHE
         .lock()
         .unwrap()
         .insert(exe_path.to_path_buf(), result.clone());
     result
+}
+
+fn desktop_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        dirs.push(PathBuf::from(data_home).join("applications"));
+    } else if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(&home).join(".local/share/applications"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/share/flatpak/exports/share/applications"));
+    }
+
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+    dirs.extend(
+        data_dirs
+            .split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| Path::new(dir).join("applications")),
+    );
+    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+    dirs.push(PathBuf::from("/var/lib/snapd/desktop/applications"));
+
+    let mut seen = HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    dirs
+}
+
+fn desktop_exec_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for character in command.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+            continue;
+        }
+        if character == '"' || character == '\'' {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+fn executable_name(command: &str) -> Option<String> {
+    let tokens = desktop_exec_tokens(command);
+    let mut tokens = tokens.iter().map(String::as_str);
+    let mut token = tokens.next()?;
+    if Path::new(token)
+        .file_name()
+        .is_some_and(|name| name == "env")
+    {
+        token = tokens.find(|token| !token.contains('='))?;
+    }
+    Path::new(token)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+}
+
+fn parse_desktop_entry(content: &str) -> Option<(Vec<String>, String)> {
+    let mut in_desktop_entry = false;
+    let mut executable_names = Vec::new();
+    let mut icon = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            if in_desktop_entry {
+                break;
+            }
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_entry || line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("Exec=")
+            && let Some(name) = executable_name(value)
+        {
+            executable_names.push(name);
+        } else if let Some(value) = line.strip_prefix("TryExec=")
+            && let Some(name) = executable_name(value)
+        {
+            executable_names.push(name);
+        } else if let Some(value) = line.strip_prefix("Icon=") {
+            icon = Some(value.trim().to_owned());
+        }
+    }
+
+    let icon = icon.filter(|icon| !icon.is_empty())?;
+    (!executable_names.is_empty()).then_some((executable_names, icon))
+}
+
+fn build_desktop_index() -> HashMap<String, String> {
+    let mut index = HashMap::new();
+    for dir in desktop_search_dirs() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "desktop")
+            {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(path) else {
+                continue;
+            };
+            let Some((executables, icon)) = parse_desktop_entry(&content) else {
+                continue;
+            };
+            for executable in executables {
+                index.entry(executable).or_insert_with(|| icon.clone());
+            }
+        }
+    }
+    index
 }
 
 fn assemble_valid_ico(group: pelite::resources::group::GroupResource<'_>) -> Vec<u8> {
@@ -267,7 +390,7 @@ pub fn find_icon_via_pe(exe_path: &Path) -> Option<RawIcon> {
 
     // Try the exact executable
     if let Some(bytes) = extract_pe_icon_bytes(exe_path) {
-        return Some(RawIcon::PngOrIco(bytes));
+        return Some(RawIcon::PngOrIco(bytes.into()));
     }
 
     // Try sibling executables in the same directory, then parent directory
@@ -282,7 +405,7 @@ pub fn find_icon_via_pe(exe_path: &Path) -> Option<RawIcon> {
                         && p != exe_path
                         && let Some(bytes) = extract_pe_icon_bytes(&p)
                     {
-                        return Some(RawIcon::PngOrIco(bytes));
+                        return Some(RawIcon::PngOrIco(bytes.into()));
                     }
                 }
             }
@@ -359,9 +482,9 @@ pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
                 .unwrap_or("png")
                 .to_lowercase();
             if ext == "svg" {
-                return Some(RawIcon::Svg(bytes));
+                return Some(RawIcon::Svg(bytes.into()));
             } else {
-                return Some(RawIcon::PngOrIco(bytes));
+                return Some(RawIcon::PngOrIco(bytes.into()));
             }
         }
     }
@@ -373,6 +496,7 @@ pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
 pub fn clear_icon_caches() {
     RAW_ICON_CACHE.lock().unwrap().clear();
     DESKTOP_CACHE.lock().unwrap().clear();
+    *DESKTOP_INDEX.lock().unwrap() = None;
     ICON_THEME_CACHE.lock().unwrap().clear();
     NEIGHBOR_ICON_CACHE.lock().unwrap().clear();
 }
@@ -404,8 +528,8 @@ pub fn get_app_icon(path: String) -> RawIcon {
 
     for path_finder in [
         |ep: &Path| find_neighboring_icon(ep),
-        |ep: &Path| crate::package_manager::find_icon_via_package_manager(ep),
         |ep: &Path| find_icon_via_desktop_file(ep),
+        |ep: &Path| crate::package_manager::find_icon_via_package_manager(ep),
     ] {
         if let Some(p) = path_finder(exe_path)
             && let Some(icon) = try_icon_from_path(&p)
@@ -418,6 +542,42 @@ pub fn get_app_icon(path: String) -> RawIcon {
         }
     }
 
-    // Fallback — not cached: static bytes, to_vec() is cheap enough per call
-    RawIcon::PngOrIco(include_bytes!("../icons/default_cef_icon.ico").to_vec())
+    let icon = DEFAULT_ICON.clone();
+    RAW_ICON_CACHE
+        .lock()
+        .unwrap()
+        .insert(exe_path.to_path_buf(), icon.clone());
+    icon
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{desktop_exec_tokens, executable_name, parse_desktop_entry};
+
+    #[test]
+    fn desktop_exec_parser_handles_quotes_and_env() {
+        assert_eq!(
+            desktop_exec_tokens("env FOO=bar \"/opt/My App/app\" --flag %U"),
+            ["env", "FOO=bar", "/opt/My App/app", "--flag", "%U"]
+        );
+        assert_eq!(
+            executable_name("env FOO=bar \"/opt/My App/app\" --flag %U").as_deref(),
+            Some("app")
+        );
+    }
+
+    #[test]
+    fn desktop_parser_stays_in_main_section() {
+        let entry = "\
+[Desktop Entry]\n\
+Exec=/opt/example/bin/example %U\n\
+TryExec=example\n\
+Icon=example-icon\n\
+[Desktop Action New]\n\
+Exec=wrong\n\
+Icon=wrong-icon\n";
+        let (executables, icon) = parse_desktop_entry(entry).unwrap();
+        assert_eq!(executables, ["example", "example"]);
+        assert_eq!(icon, "example-icon");
+    }
 }

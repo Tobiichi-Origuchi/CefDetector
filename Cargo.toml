@@ -13,7 +13,7 @@ pelite = "0.10.0"
 ignore = "0.4.31"
 memchr = "2.8.3"
 memmap2 = "0.9.11"
-backhand = "0.25.1"
+backhand = { version = "0.25.1", default-features = false, features = ["gzip", "lz4", "xz", "zstd"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "ico", "webp"] }
 egui = { version = "0.35.0", default-features = false }
 egui_glow = { version = "0.35.0", default-features = false, features = ["wayland", "winit", "x11"] }
