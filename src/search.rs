@@ -3,21 +3,21 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use crate::models::AppInfo;
 
-static FILE_PATTERNS: LazyLock<regex::RegexSet> = LazyLock::new(|| {
-    regex::RegexSet::new([
-        r"_100_.*\.pak$", // 0: Chromium PAK resource files
-        r"libcef",        // 1: CEF library
-        r"libnode.*\.so", // 2: Node.js shared library (Electron)
-    ])
-    .unwrap()
-});
+fn match_file_patterns(name: &str) -> (bool, bool, bool) {
+    let matched_pak = name.contains("_100_") && name.ends_with(".pak");
+    let matched_cef = name.contains("libcef");
+    let matched_node = name
+        .find("libnode")
+        .is_some_and(|start| name[start + "libnode".len()..].contains(".so"));
+    (matched_pak, matched_cef, matched_node)
+}
 
 pub fn open_path(path: String, is_dir: bool) {
-    if is_dir {
+    if path.contains("://") || is_dir {
         let _ = Command::new("xdg-open").arg(path).spawn();
     } else {
         if let Some(p) = Path::new(&path).parent() {
@@ -126,10 +126,7 @@ fn single_pass_scan() -> ScanResults {
                 && file_type.is_file()
             {
                 let name = entry.file_name().to_string_lossy();
-                let pattern_matches = FILE_PATTERNS.matches(&name);
-                let matched_pak = pattern_matches.matched(0);
-                let matched_cef = pattern_matches.matched(1);
-                let matched_node = pattern_matches.matched(2);
+                let (matched_pak, matched_cef, matched_node) = match_file_patterns(&name);
 
                 if matched_pak || matched_cef || matched_node {
                     let path_str = entry.path().to_string_lossy().into_owned();

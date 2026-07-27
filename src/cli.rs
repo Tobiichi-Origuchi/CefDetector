@@ -1,4 +1,6 @@
-use crate::models::CliAppInfo;
+use std::fmt::Write as _;
+
+use crate::models::AppInfo;
 use crate::search::core_search;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -8,6 +10,50 @@ enum OutputFormat {
     Toml,
     Json,
     Csv,
+}
+
+fn push_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{00}'..='\u{1f}' => {
+                write!(output, "\\u{:04x}", ch as u32).unwrap();
+            }
+            _ => output.push(ch),
+        }
+    }
+    output.push('"');
+}
+
+fn format_json(results: &[AppInfo]) -> String {
+    let mut output = String::from("[");
+    for (index, result) in results.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push_str("\n  {\n    \"file\": ");
+        push_json_string(&mut output, &result.file);
+        output.push_str(",\n    \"app_type\": ");
+        push_json_string(&mut output, &result.app_type);
+        write!(
+            output,
+            ",\n    \"size\": {},\n    \"is_running\": {},\n    \"is_dir\": {}\n  }}",
+            result.size, result.is_running, result.is_dir
+        )
+        .unwrap();
+    }
+    if !results.is_empty() {
+        output.push('\n');
+    }
+    output.push(']');
+    output
 }
 
 pub fn handle_cli() {
@@ -68,19 +114,7 @@ pub fn handle_cli() {
         });
 
         let output_str = match fmt {
-            OutputFormat::Json => {
-                let cli_results: Vec<CliAppInfo> = results
-                    .iter()
-                    .map(|r| CliAppInfo {
-                        file: &r.file,
-                        app_type: &r.app_type,
-                        size: r.size,
-                        is_running: r.is_running,
-                        is_dir: r.is_dir,
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&cli_results).unwrap_or_default()
-            }
+            OutputFormat::Json => format_json(&results),
             OutputFormat::Toml => {
                 let mut s = String::new();
                 for r in &results {
@@ -118,5 +152,33 @@ pub fn handle_cli() {
             println!("{}", output_str);
         }
         std::process::exit(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_json, push_json_string};
+    use crate::models::AppInfo;
+
+    #[test]
+    fn json_strings_escape_control_characters() {
+        let mut output = String::new();
+        push_json_string(&mut output, "a\"b\\c\n\t\u{01}中文");
+        assert_eq!(output, "\"a\\\"b\\\\c\\n\\t\\u0001中文\"");
+    }
+
+    #[test]
+    fn json_output_keeps_the_cli_schema() {
+        let output = format_json(&[AppInfo {
+            file: "/tmp/app".into(),
+            app_type: "CEF".into(),
+            size: 42,
+            is_running: true,
+            is_dir: false,
+        }]);
+        assert_eq!(
+            output,
+            "[\n  {\n    \"file\": \"/tmp/app\",\n    \"app_type\": \"CEF\",\n    \"size\": 42,\n    \"is_running\": true,\n    \"is_dir\": false\n  }\n]"
+        );
     }
 }
