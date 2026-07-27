@@ -1,4 +1,4 @@
-# CEF Detector Linux - 一眼CEF Linux: 年轻人的第一款 Linux CEF检测器 [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
+# CEF Detector Linux - 一眼CEF Linux: 年轻人的第一款 Linux CEF检测器 [![CI](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
 
 Check how many CEFs are on your Linux
 
