@@ -1,42 +1,134 @@
 name: Release
 
 on:
-  release:
-    types:
-      - created
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PACKAGER_VERSION: 0.11.8
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  package:
+    name: Package and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: write
+
     steps:
-      - name: Check out git repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.92.0
-
-      - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-
-      - name: Build and Package
+      - name: Resolve release tag
+        id: release
+        env:
+          PUSH_TAG: ${{ github.ref_name }}
+          MANUAL_TAG: ${{ inputs.tag }}
         run: |
-          cargo install cargo-packager --locked
-          cargo build --release
-          cargo packager --release
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            release_tag="${MANUAL_TAG}"
+          else
+            release_tag="${PUSH_TAG}"
+          fi
+          if [[ ! "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: ${release_tag}" >&2
+            exit 1
+          fi
+          echo "tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          if [[ "${release_tag}" == *-* ]]; then
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
 
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v2
+      - name: Check out release tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          files: |
-            target/release/packager/*.deb
-            target/release/packager/*_x86_64.tar.gz
+          ref: ${{ steps.release.outputs.tag }}
+          persist-credentials: false
 
-      - name: Publish to AUR
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libfontconfig1-dev pkg-config
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: release
+
+      - name: Verify tag matches Cargo version
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          package_version="$(cargo pkgid --locked | sed -E 's/.*@//')"
+          tag_version="${RELEASE_TAG#v}"
+          if [[ "${package_version}" != "${tag_version}" ]]; then
+            echo "Cargo version ${package_version} does not match tag ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+      - name: Validate release source
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version "=${CARGO_PACKAGER_VERSION}" --locked
+
+      - name: Build packages
+        run: cargo packager --release
+
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/packager/*.deb dist/
+          cp target/release/packager/*_x86_64.tar.gz dist/
+          (
+            cd dist
+            sha256sum -- * > SHA256SUMS
+          )
+          ls -lh dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
+
+      - name: Publish stable release to AUR
+        if: steps.release.outputs.prerelease == 'false'
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          RELEASE_ASSET_DIR: ${{ github.workspace }}/dist
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          ./.github/scripts/publish-aur.sh ${{ github.ref_name }}
+          if [[ -z "${AUR_SSH_PRIVATE_KEY}" ]]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY is not configured; skipping AUR publication"
+            exit 0
+          fi
+          ./.github/scripts/publish-aur.sh "${RELEASE_TAG}"

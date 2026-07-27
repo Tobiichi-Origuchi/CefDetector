@@ -1,85 +1,108 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
 
-VERSION=$1
-if [ -z "$VERSION" ]; then
-    echo "Usage: ./publish-aur.sh <version>"
+set -euo pipefail
+
+AUR_TAG=${1:-}
+AUR_GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-Tobiichi-Origuchi/CefDetectorLinux}
+AUR_ASSET_DIR=${RELEASE_ASSET_DIR:-target/release/packager}
+AUR_HOST="aur.archlinux.org"
+AUR_EXPECTED_HOST_FINGERPRINT="SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
+
+if [[ ! "${AUR_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Usage: $0 <stable-v-prefixed-version>" >&2
+    exit 2
+fi
+if [[ -z "${AUR_SSH_PRIVATE_KEY:-}" ]]; then
+    echo "AUR_SSH_PRIVATE_KEY is required" >&2
+    exit 2
+fi
+
+AUR_VERSION=${AUR_TAG#v}
+AUR_PACKAGE_FILE="cefdetector_${AUR_VERSION}_x86_64.tar.gz"
+AUR_LOCAL_PACKAGE="${AUR_ASSET_DIR}/${AUR_PACKAGE_FILE}"
+AUR_PACKAGE_URL="https://github.com/${AUR_GITHUB_REPOSITORY}/releases/download/${AUR_TAG}/${AUR_PACKAGE_FILE}"
+
+if [[ ! -f "${AUR_LOCAL_PACKAGE}" ]]; then
+    echo "Release package not found: ${AUR_LOCAL_PACKAGE}" >&2
     exit 1
 fi
 
-RAW_VERSION=${VERSION#v}
+AUR_WORK_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/cefdetector-aur.XXXXXX")
+AUR_KEY_FILE="${AUR_WORK_DIR}/aur_key"
+AUR_KNOWN_HOSTS="${AUR_WORK_DIR}/known_hosts"
+AUR_REPOSITORY_DIR="${AUR_WORK_DIR}/cefdetector-bin"
 
-echo "Configuring git for AUR..."
-git config --global user.name "github-actions[bot]"
-git config --global user.email "github-actions[bot]@users.noreply.github.com"
+aur_cleanup() {
+    rm -f "${AUR_KEY_FILE}"
+    rm -rf "${AUR_WORK_DIR}"
+}
+trap aur_cleanup EXIT
 
-mkdir -p ~/.ssh
-echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur_key
-chmod 600 ~/.ssh/aur_key
-ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${AUR_KEY_FILE}"
+chmod 600 "${AUR_KEY_FILE}"
 
-cat <<EOF > ~/.ssh/config
-Host aur.archlinux.org
-  IdentityFile ~/.ssh/aur_key
-  User aur
-EOF
-
-git clone ssh://aur@aur.archlinux.org/cefdetector-bin.git aur-repo
-cd aur-repo
-
-PKG_FILE="cefdetector_${RAW_VERSION}_x86_64.tar.gz"
-PKG_URL="https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases/download/v${RAW_VERSION}/${PKG_FILE}"
-
-echo "Calculating sha256sum..."
-LOCAL_PKG="../target/release/packager/${PKG_FILE}"
-if [ ! -f "$LOCAL_PKG" ]; then
-    echo "Error: Local pacman package not found at $LOCAL_PKG"
+ssh-keyscan -t ed25519 "${AUR_HOST}" > "${AUR_KNOWN_HOSTS}" 2>/dev/null
+AUR_HOST_FINGERPRINT=$(ssh-keygen -lf "${AUR_KNOWN_HOSTS}" -E sha256 | awk '{print $2}')
+if [[ "${AUR_HOST_FINGERPRINT}" != "${AUR_EXPECTED_HOST_FINGERPRINT}" ]]; then
+    echo "Unexpected ${AUR_HOST} SSH fingerprint: ${AUR_HOST_FINGERPRINT}" >&2
     exit 1
 fi
-SHA256=$(sha256sum "$LOCAL_PKG" | awk '{print $1}')
 
-echo "Generating PKGBUILD..."
-cat <<EOF > PKGBUILD
+AUR_SSH_COMMAND="ssh -i ${AUR_KEY_FILE} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${AUR_KNOWN_HOSTS}"
+GIT_SSH_COMMAND="${AUR_SSH_COMMAND}" \
+    git clone "ssh://aur@${AUR_HOST}/cefdetector-bin.git" "${AUR_REPOSITORY_DIR}"
+
+git -C "${AUR_REPOSITORY_DIR}" config user.name "github-actions[bot]"
+git -C "${AUR_REPOSITORY_DIR}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+AUR_SHA256=$(sha256sum "${AUR_LOCAL_PACKAGE}" | awk '{print $1}')
+
+cat > "${AUR_REPOSITORY_DIR}/PKGBUILD" <<EOF
 pkgname=cefdetector-bin
-pkgver=${RAW_VERSION}
+pkgver=${AUR_VERSION}
 pkgrel=1
 pkgdesc="Check how many CEFs are on your Linux."
 arch=('x86_64')
-url="https://github.com/Tobiichi-Origuchi/CefDetectorLinux"
+url="https://github.com/${AUR_GITHUB_REPOSITORY}"
 license=('MIT')
+depends=('fontconfig' 'libglvnd' 'xdg-utils')
 provides=('cefdetector')
 conflicts=('cefdetector')
-source=("\${pkgname}-\${pkgver}.tar.gz::${PKG_URL}")
-sha256sums=('${SHA256}')
+source=("\${pkgname}-\${pkgver}.tar.gz::${AUR_PACKAGE_URL}")
+sha256sums=('${AUR_SHA256}')
 noextract=("\${pkgname}-\${pkgver}.tar.gz")
 
 package() {
-    bsdtar -xf "\${srcdir}/\${pkgname}-\${pkgver}.tar.gz" -C "\$pkgdir/"
+    bsdtar -xf "\${srcdir}/\${pkgname}-\${pkgver}.tar.gz" -C "\${pkgdir}/"
 }
 EOF
 
-echo "Generating .SRCINFO..."
-cat <<EOF > .SRCINFO
+cat > "${AUR_REPOSITORY_DIR}/.SRCINFO" <<EOF
 pkgbase = cefdetector-bin
 	pkgdesc = Check how many CEFs are on your Linux.
-	pkgver = ${RAW_VERSION}
+	pkgver = ${AUR_VERSION}
 	pkgrel = 1
-	url = https://github.com/Tobiichi-Origuchi/CefDetectorLinux
+	url = https://github.com/${AUR_GITHUB_REPOSITORY}
 	arch = x86_64
 	license = MIT
+	depends = fontconfig
+	depends = libglvnd
+	depends = xdg-utils
 	provides = cefdetector
 	conflicts = cefdetector
-	source = ${PKG_FILE}::${PKG_URL}
-	sha256sums = ${SHA256}
+	source = cefdetector-bin-${AUR_VERSION}.tar.gz::${AUR_PACKAGE_URL}
+	noextract = cefdetector-bin-${AUR_VERSION}.tar.gz
+	sha256sums = ${AUR_SHA256}
 
 pkgname = cefdetector-bin
 EOF
 
-git add PKGBUILD .SRCINFO
-if ! git diff-index --quiet HEAD; then
-    echo "Pushing new version to AUR..."
-    git commit -m "Update to v${RAW_VERSION}"
-    git push origin master
-else
-    echo "No changes to commit for AUR."
+git -C "${AUR_REPOSITORY_DIR}" add PKGBUILD .SRCINFO
+if git -C "${AUR_REPOSITORY_DIR}" diff-index --quiet HEAD --; then
+    echo "AUR package is already up to date."
+    exit 0
 fi
+
+git -C "${AUR_REPOSITORY_DIR}" commit -m "Update to ${AUR_TAG}"
+GIT_SSH_COMMAND="${AUR_SSH_COMMAND}" \
+    git -C "${AUR_REPOSITORY_DIR}" push origin HEAD:master
