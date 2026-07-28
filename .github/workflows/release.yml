@@ -136,6 +136,7 @@ jobs:
         run: cargo packager --release
 
       - name: Test GUI startup
+        timeout-minutes: 2
         run: |
           xvfb-run --auto-servernum env \
             CEFDETECTOR_GUI_SMOKE_TEST=1 \
@@ -210,6 +211,7 @@ jobs:
           deployment-choice: "1"
 
       - name: Test GUI startup
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
