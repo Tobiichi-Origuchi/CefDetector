@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -100,34 +101,54 @@ pub fn open_path(path: String, is_dir: bool) {
 }
 
 #[cfg(target_os = "windows")]
+fn explorer_select_argument(path: &std::ffi::OsStr) -> std::ffi::OsString {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    let mut argument: Vec<u16> = "/select,\"".encode_utf16().collect();
+    argument.extend(path.encode_wide());
+    argument.extend("\"".encode_utf16());
+    std::ffi::OsString::from_wide(&argument)
+}
+
+#[cfg(target_os = "windows")]
 pub fn open_path(path: String, is_dir: bool) {
-    if path.contains("://") || is_dir {
-        use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::ffi::OsStrExt as _;
 
-        use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+    let operation = ['o', 'p', 'e', 'n', '\0'].map(|character| character as u16);
+    let (target, parameters) = if path.contains("://") || is_dir {
         let target: Vec<u16> = std::ffi::OsStr::new(&path)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let operation = ['o', 'p', 'e', 'n', '\0'].map(|character| character as u16);
-        // SAFETY: operation and target are null-terminated and remain alive for
-        // the duration of ShellExecuteW.
-        unsafe {
-            ShellExecuteW(
-                std::ptr::null_mut(),
-                operation.as_ptr(),
-                target.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                SW_SHOWNORMAL,
-            );
-        }
+        (target, None)
     } else {
-        let mut argument = std::ffi::OsString::from("/select,");
-        argument.push(path);
-        let _ = Command::new("explorer.exe").arg(argument).spawn();
+        let target = "explorer.exe\0".encode_utf16().collect();
+        let parameters = explorer_select_argument(std::ffi::OsStr::new(&path))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        (target, Some(parameters))
+    };
+    let parameters = parameters
+        .as_ref()
+        .map_or(std::ptr::null(), |parameters: &Vec<u16>| {
+            parameters.as_ptr()
+        });
+
+    // SAFETY: operation, target, and optional parameters are null-terminated
+    // and remain alive for the duration of ShellExecuteW.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            parameters,
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -721,10 +742,22 @@ mod tests {
     use std::io::Cursor;
 
     use super::backend::{CandidateKind, classify_candidate_name};
+    #[cfg(target_os = "windows")]
+    use super::explorer_select_argument;
     use super::{
         AppKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, is_relevant_shared_library,
         scan_signature_reader,
     };
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_selection_quotes_paths_with_spaces_and_unicode() {
+        let path = std::ffi::OsStr::new(r"C:\Program Files (x86)\示例 应用\应用程序.exe");
+        assert_eq!(
+            explorer_select_argument(path),
+            r#"/select,"C:\Program Files (x86)\示例 应用\应用程序.exe""#
+        );
+    }
 
     #[test]
     fn candidate_names_are_precise() {
