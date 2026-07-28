@@ -1185,6 +1185,10 @@ impl GlowApplication {
         self.frontend = Some(frontend);
         self.egui = Some(egui);
         self.gl = Some(gl);
+        // A hidden Win32 window does not reliably receive its initial paint
+        // request. Reveal it only after initialization has succeeded, then
+        // request the first frame.
+        gl_window.window.set_visible(true);
         gl_window.window.request_redraw();
         self.gl_window = Some(gl_window);
         Ok(())
@@ -1215,7 +1219,6 @@ impl GlowApplication {
         }
         egui.paint(&gl_window.window);
         gl_window.swap_buffers()?;
-        gl_window.window.set_visible(true);
         Ok(())
     }
 
