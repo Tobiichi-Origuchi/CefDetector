@@ -967,10 +967,12 @@ impl EguiRenderer {
 }
 
 struct GlutinWindow {
-    window: winit::window::Window,
+    // Rust drops fields in declaration order. GPU resources must be released
+    // before their display server window (notably EGL surfaces on Wayland).
+    surface: Surface<WindowSurface>,
     context: PossiblyCurrentContext,
     display: Display,
-    surface: Surface<WindowSurface>,
+    window: winit::window::Window,
 }
 
 impl GlutinWindow {
@@ -1093,10 +1095,10 @@ impl GlutinWindow {
         );
 
         Ok(Self {
-            window,
+            surface,
             context,
             display,
-            surface,
+            window,
         })
     }
 
@@ -1297,9 +1299,14 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
     }
 
     fn exiting(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-        if let Some(egui) = &mut self.egui {
+        // Drop UI textures while the GL context is still current, then release
+        // the renderer, GL loader, native surface, and window in that order.
+        self.frontend.take();
+        if let Some(mut egui) = self.egui.take() {
             egui.destroy();
         }
+        self.gl.take();
+        self.gl_window.take();
     }
 }
 
