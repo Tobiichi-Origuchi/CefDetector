@@ -1,13 +1,13 @@
 use std::io;
 use std::path::PathBuf;
 
-#[cfg(feature = "everything")]
+#[cfg(all(feature = "everything", target_os = "windows"))]
 mod everything;
-#[cfg(any(test, feature = "everything"))]
+#[cfg(any(test, all(feature = "everything", target_os = "windows")))]
 mod everything_protocol;
 #[cfg(feature = "ignore")]
 mod ignore;
-#[cfg(feature = "plocate")]
+#[cfg(all(feature = "plocate", target_os = "linux"))]
 mod plocate;
 
 #[cfg(not(any(feature = "ignore", feature = "plocate", feature = "everything")))]
@@ -50,21 +50,67 @@ pub(super) trait CandidateSource {
 }
 
 #[cfg(all(
+    feature = "everything",
     not(feature = "ignore"),
     not(feature = "plocate"),
-    feature = "everything"
+    target_os = "windows"
 ))]
 use self::everything::EverythingCandidateSource as ActiveCandidateSource;
-#[cfg(feature = "ignore")]
+#[cfg(all(
+    feature = "ignore",
+    not(feature = "plocate"),
+    not(feature = "everything")
+))]
 use self::ignore::IgnoreCandidateSource as ActiveCandidateSource;
-#[cfg(all(not(feature = "ignore"), feature = "plocate"))]
+#[cfg(all(
+    feature = "plocate",
+    not(feature = "ignore"),
+    not(feature = "everything"),
+    target_os = "linux"
+))]
 use self::plocate::PlocateCandidateSource as ActiveCandidateSource;
 
-#[cfg(not(any(feature = "ignore", feature = "plocate", feature = "everything")))]
+#[cfg(not(any(
+    all(
+        feature = "ignore",
+        not(feature = "plocate"),
+        not(feature = "everything")
+    ),
+    all(
+        feature = "plocate",
+        not(feature = "ignore"),
+        not(feature = "everything"),
+        target_os = "linux"
+    ),
+    all(
+        feature = "everything",
+        not(feature = "ignore"),
+        not(feature = "plocate"),
+        target_os = "windows"
+    )
+)))]
 #[derive(Default)]
 struct ActiveCandidateSource;
 
-#[cfg(not(any(feature = "ignore", feature = "plocate", feature = "everything")))]
+#[cfg(not(any(
+    all(
+        feature = "ignore",
+        not(feature = "plocate"),
+        not(feature = "everything")
+    ),
+    all(
+        feature = "plocate",
+        not(feature = "ignore"),
+        not(feature = "everything"),
+        target_os = "linux"
+    ),
+    all(
+        feature = "everything",
+        not(feature = "ignore"),
+        not(feature = "plocate"),
+        target_os = "windows"
+    )
+)))]
 impl CandidateSource for ActiveCandidateSource {
     fn find_candidates(&self) -> io::Result<Vec<ScanCandidate>> {
         unreachable!("the compile-time feature check requires a search backend")
