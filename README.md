@@ -92,6 +92,8 @@ D:\Games\build
 
 ## Benchmark
 
+### Linux
+
 测试完整的 CLI 搜索（默认预热 1 次、正式运行 5 次）：
 
 ```bash
@@ -109,6 +111,32 @@ D:\Games\build
 ```bash
 ./benchmark.sh scan --no-build --warmup 2 --runs 10
 ```
+
+### Windows
+
+Windows 脚本会分别构建并测试 ignore 与 Everything IPC 两种搜索后端。测试
+Everything 后端前，需要启动 Everything 桌面客户端并启用 IPC。
+
+一次运行 CLI 搜索、GUI 首帧启动和固定时长 GUI 采样，并将原始数据写入 CSV：
+
+```powershell
+pwsh -NoProfile -File .\benchmark.ps1
+```
+
+只测试两种 CLI 后端并调整预热和正式运行次数：
+
+```powershell
+pwsh -NoProfile -File .\benchmark.ps1 -Mode scan -WarmupRuns 2 -ScanRuns 10
+```
+
+只测试 GUI，并复用已经构建的两个二进制：
+
+```powershell
+pwsh -NoProfile -File .\benchmark.ps1 -Mode gui -GuiDurationSeconds 10 -NoBuild
+```
+
+CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、整机 CPU 占比、
+峰值工作集、峰值私有内存、句柄数、线程数、退出状态和 CLI 结果数。
 
 ## 作者
 
