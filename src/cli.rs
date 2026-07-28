@@ -93,7 +93,7 @@ pub fn handle_cli() {
     }
 
     if show_help {
-        println!("Linux CEF Detector {}", VERSION);
+        println!("CEF Detector {}", VERSION);
         println!();
         println!("Usage: cefdetector [OPTIONS]");
         println!();

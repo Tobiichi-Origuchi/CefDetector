@@ -18,7 +18,8 @@ use winit::raw_window_handle::HasWindowHandle as _;
 use crate::icon_finder::{RawIcon, get_app_icon};
 use crate::search::core_search;
 
-const WINDOW_TITLE: &str = "CEF Detector Linux";
+const WINDOW_TITLE: &str = "CEF Detector";
+#[cfg(target_os = "linux")]
 const APP_ID: &str = "cefdetector";
 const REPOSITORY_URL: &str = "https://github.com/Tobiichi-Origuchi/CefDetectorLinux";
 
@@ -533,6 +534,7 @@ fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
             let _ = sender.send(SearchMessage::Failed(error.to_string()));
             ctx.request_repaint();
             crate::icon_finder::clear_icon_caches();
+            #[cfg(target_os = "linux")]
             crate::package_manager::clear_pm_cache();
             return;
         }
@@ -550,6 +552,7 @@ fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
         ctx.request_repaint();
 
         crate::icon_finder::clear_icon_caches();
+        #[cfg(target_os = "linux")]
         crate::package_manager::clear_pm_cache();
     });
 }
@@ -671,6 +674,7 @@ struct SystemFont {
     index: u32,
 }
 
+#[cfg(target_os = "linux")]
 fn match_system_font(pattern: &str) -> Option<SystemFont> {
     let output = std::process::Command::new("fc-match")
         .args(["-f", "%{file}\n%{index}\n", pattern])
@@ -687,36 +691,85 @@ fn match_system_font(pattern: &str) -> Option<SystemFont> {
     path.is_file().then_some(SystemFont { path, index })
 }
 
+#[cfg(target_os = "linux")]
+fn regular_system_fonts() -> Vec<SystemFont> {
+    [
+        match_system_font("sans-serif"),
+        match_system_font("sans-serif:lang=zh-cn"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn bold_system_fonts() -> Vec<SystemFont> {
+    [
+        match_system_font("sans-serif:style=bold"),
+        match_system_font("sans-serif:lang=zh-cn:style=bold"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn fonts_from_windows_directory(file_names: &[&str]) -> Vec<SystemFont> {
+    let windows_dir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let fonts_dir = windows_dir.join("Fonts");
+    file_names
+        .iter()
+        .map(|file_name| fonts_dir.join(file_name))
+        .filter(|path| path.is_file())
+        .map(|path| SystemFont { path, index: 0 })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn regular_system_fonts() -> Vec<SystemFont> {
+    fonts_from_windows_directory(&[
+        "segoeui.ttf",
+        "msyh.ttc",
+        "msjh.ttc",
+        "malgun.ttf",
+        "meiryo.ttc",
+    ])
+}
+
+#[cfg(target_os = "windows")]
+fn bold_system_fonts() -> Vec<SystemFont> {
+    fonts_from_windows_directory(&[
+        "segoeuib.ttf",
+        "msyhbd.ttc",
+        "msjhbd.ttc",
+        "malgunbd.ttf",
+        "meiryob.ttc",
+    ])
+}
+
 fn configure_fonts(ctx: &egui::Context) -> (FontFamily, FontFamily) {
     let regular_family = FontFamily::Name("cefdetector-regular".into());
     let bold_family = FontFamily::Name("cefdetector-bold".into());
     let mut definitions = FontDefinitions::empty();
     let mut mapped_files: HashMap<PathBuf, &'static [u8]> = HashMap::new();
 
-    let regular = [
-        match_system_font("sans-serif"),
-        match_system_font("sans-serif:lang=zh-cn"),
-    ];
-    let bold = [
-        match_system_font("sans-serif:style=bold"),
-        match_system_font("sans-serif:lang=zh-cn:style=bold"),
-    ];
-
     let regular_names = add_system_fonts(
         &mut definitions,
         &mut mapped_files,
         "cefdetector-system-regular",
-        regular.into_iter().flatten(),
+        regular_system_fonts().into_iter(),
     );
     let mut bold_names = add_system_fonts(
         &mut definitions,
         &mut mapped_files,
         "cefdetector-system-bold",
-        bold.into_iter().flatten(),
+        bold_system_fonts().into_iter(),
     );
 
     if regular_names.is_empty() {
-        panic!("No system sans-serif font found through fontconfig");
+        panic!("No supported system sans-serif font was found");
     }
     if bold_names.is_empty() {
         bold_names.clone_from(&regular_names);
@@ -794,15 +847,19 @@ impl GlutinWindow {
         use glutin::context::NotCurrentGlContext as _;
         use glutin::display::{GetGlDisplay as _, GlDisplay as _};
         use glutin::prelude::GlSurface as _;
-        use winit::platform::x11::WindowAttributesExtX11 as _;
 
         let window_attributes = winit::window::WindowAttributes::default()
             .with_title(WINDOW_TITLE)
             .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
             .with_resizable(true)
             .with_visible(false)
-            .with_window_icon(window_icon())
-            .with_name(APP_ID, APP_ID);
+            .with_window_icon(window_icon());
+
+        #[cfg(target_os = "linux")]
+        let window_attributes = {
+            use winit::platform::x11::WindowAttributesExtX11 as _;
+            window_attributes.with_name(APP_ID, APP_ID)
+        };
 
         let config_template = glutin::config::ConfigTemplateBuilder::new()
             .prefer_hardware_accelerated(Some(true))

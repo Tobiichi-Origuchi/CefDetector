@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::models::AppInfo;
 
@@ -81,12 +83,14 @@ struct DetectedApp {
     is_dir: bool,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct FileIdentity {
     device: u64,
     inode: u64,
 }
 
+#[cfg(target_os = "linux")]
 pub fn open_path(path: String, is_dir: bool) {
     if path.contains("://") || is_dir {
         let _ = Command::new("xdg-open").arg(path).spawn();
@@ -95,8 +99,41 @@ pub fn open_path(path: String, is_dir: bool) {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn open_path(path: String, is_dir: bool) {
+    if path.contains("://") || is_dir {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let target: Vec<u16> = std::ffi::OsStr::new(&path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let operation = ['o', 'p', 'e', 'n', '\0'].map(|character| character as u16);
+        // SAFETY: operation and target are null-terminated and remain alive for
+        // the duration of ShellExecuteW.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    } else {
+        let mut argument = std::ffi::OsString::from("/select,");
+        argument.push(path);
+        let _ = Command::new("explorer.exe").arg(argument).spawn();
+    }
+}
+
 fn dir_size(dir: &Path) -> u64 {
     let mut total = 0_u64;
+    #[cfg(target_os = "linux")]
     let mut visited = HashSet::new();
     let mut pending = vec![dir.to_path_buf()];
 
@@ -109,16 +146,17 @@ fn dir_size(dir: &Path) -> u64 {
             let Ok(metadata) = fs::symlink_metadata(&path) else {
                 continue;
             };
-            let identity = FileIdentity {
+
+            #[cfg(target_os = "linux")]
+            if !visited.insert(FileIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
-            };
-            if !visited.insert(identity) {
+            }) {
                 continue;
             }
 
-            total = total.saturating_add(metadata.size());
-            if metadata.file_type().is_dir() {
+            total = total.saturating_add(metadata.len());
+            if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
                 pending.push(path);
             }
         }
@@ -161,6 +199,7 @@ fn calculate_dir_sizes(apps: &[DetectedApp]) -> Vec<u64> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(target_os = "linux")]
 fn get_running_processes() -> HashSet<PathBuf> {
     let mut processes = HashSet::new();
     let Ok(entries) = fs::read_dir("/proc") else {
@@ -179,6 +218,97 @@ fn get_running_processes() -> HashSet<PathBuf> {
         }
     }
     processes
+}
+
+#[cfg(target_os = "windows")]
+fn get_running_processes() -> HashSet<String> {
+    use std::ffi::OsString;
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+
+    struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: OwnedHandle is only constructed for a valid owned handle.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    // SAFETY: The call has no borrowed parameters and the returned handle is
+    // closed by OwnedHandle.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return HashSet::new();
+    }
+    let snapshot = OwnedHandle(snapshot);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut processes = HashSet::new();
+
+    // SAFETY: entry has the required size and remains valid during enumeration.
+    if unsafe { Process32FirstW(snapshot.0, &mut entry) } == 0 {
+        return processes;
+    }
+
+    loop {
+        // SAFETY: OpenProcess does not borrow the process ID. A non-null handle
+        // is closed before the next iteration.
+        let process =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID) };
+        if !process.is_null() {
+            let process = OwnedHandle(process);
+            let mut path = vec![0_u16; 32_768];
+            let mut length = path.len() as u32;
+            // SAFETY: path is writable for length UTF-16 units and process is a
+            // valid process handle. Failures (for protected processes) are ignored.
+            if unsafe { QueryFullProcessImageNameW(process.0, 0, path.as_mut_ptr(), &mut length) }
+                != 0
+            {
+                let path = PathBuf::from(OsString::from_wide(&path[..length as usize]));
+                processes.insert(normalize_windows_path(&path));
+            }
+        }
+
+        // SAFETY: entry remains initialized with the required dwSize.
+        if unsafe { Process32NextW(snapshot.0, &mut entry) } == 0 {
+            break;
+        }
+    }
+
+    processes
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_path(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('/', "\\");
+    path.strip_prefix(r"\\?\").unwrap_or(&path).to_lowercase()
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_running(processes: &HashSet<PathBuf>, path: &Path) -> bool {
+    processes.contains(path)
+        || fs::canonicalize(path).is_ok_and(|canonical| processes.contains(&canonical))
+}
+
+#[cfg(target_os = "windows")]
+fn process_is_running(processes: &HashSet<String>, path: &Path) -> bool {
+    processes.contains(&normalize_windows_path(path))
+        || fs::canonicalize(path)
+            .is_ok_and(|canonical| processes.contains(&normalize_windows_path(&canonical)))
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -357,7 +487,10 @@ fn inspect_directory(dir: &Path, flavor: ScanFlavor) -> DirectoryInspection {
             }
         }
 
+        #[cfg(target_os = "linux")]
         let is_executable = metadata.permissions().mode() & 0o111 != 0;
+        #[cfg(target_os = "windows")]
+        let is_executable = false;
         let is_shared = is_shared_library(&file_name);
         let is_windows_executable = file_name.ends_with(".exe");
         if !is_executable && !is_shared && !is_windows_executable {
@@ -568,9 +701,7 @@ where
         let is_running = if app.is_dir {
             false
         } else {
-            running_processes.contains(&app.file)
-                || fs::canonicalize(&app.file)
-                    .is_ok_and(|canonical| running_processes.contains(&canonical))
+            process_is_running(&running_processes, &app.file)
         };
 
         on_found(AppInfo {

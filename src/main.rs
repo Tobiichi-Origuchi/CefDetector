@@ -1,10 +1,9 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 mod cli;
 mod gui;
 
 pub mod icon_finder;
 pub mod models;
+#[cfg(target_os = "linux")]
 pub mod package_manager;
 pub mod search;
 

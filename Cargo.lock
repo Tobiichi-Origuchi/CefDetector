@@ -253,6 +253,7 @@ dependencies = [
  "memmap2",
  "pelite",
  "resvg",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -841,6 +842,7 @@ dependencies = [
  "dispatch2",
  "glutin_egl_sys",
  "glutin_glx_sys",
+ "glutin_wgl_sys",
  "libloading",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -849,6 +851,7 @@ dependencies = [
  "once_cell",
  "raw-window-handle",
  "wayland-sys",
+ "windows-sys 0.52.0",
  "x11-dl",
 ]
 
@@ -882,6 +885,15 @@ checksum = "8a7bb2938045a88b612499fbcba375a77198e01306f52272e692f8c1f3751185"
 dependencies = [
  "gl_generator",
  "x11-dl",
+]
+
+[[package]]
+name = "glutin_wgl_sys"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c4ee00b289aba7a9e5306d57c2d05499b2e5dc427f84ac708bd2c090212cf3e"
+dependencies = [
+ "gl_generator",
 ]
 
 [[package]]

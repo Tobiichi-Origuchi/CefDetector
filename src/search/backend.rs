@@ -74,6 +74,11 @@ pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
 }
 
 pub(super) fn classify_candidate_name(name: &str) -> Option<CandidateKind> {
+    #[cfg(target_os = "windows")]
+    let name = name.to_ascii_lowercase();
+    #[cfg(target_os = "windows")]
+    let name = name.as_str();
+
     if name.contains("_100_") && name.ends_with(".pak") {
         Some(CandidateKind::Pak)
     } else if name == "libcef.so"

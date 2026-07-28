@@ -418,6 +418,7 @@ pub fn find_icon_via_pe(exe_path: &Path) -> Option<RawIcon> {
     None
 }
 
+#[cfg(target_os = "linux")]
 pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
     use backhand::{InnerNode, Squashfs};
     use memmap2::MmapOptions;
@@ -517,6 +518,7 @@ pub fn get_app_icon(path: String) -> RawIcon {
         return result;
     }
 
+    #[cfg(target_os = "linux")]
     if let Some(b) = find_icon_via_appimage(exe_path) {
         let result = b;
         RAW_ICON_CACHE
@@ -526,8 +528,18 @@ pub fn get_app_icon(path: String) -> RawIcon {
         return result;
     }
 
+    if let Some(p) = find_neighboring_icon(exe_path)
+        && let Some(icon) = try_icon_from_path(&p)
+    {
+        RAW_ICON_CACHE
+            .lock()
+            .unwrap()
+            .insert(exe_path.to_path_buf(), icon.clone());
+        return icon;
+    }
+
+    #[cfg(target_os = "linux")]
     for path_finder in [
-        |ep: &Path| find_neighboring_icon(ep),
         |ep: &Path| find_icon_via_desktop_file(ep),
         |ep: &Path| crate::package_manager::find_icon_via_package_manager(ep),
     ] {

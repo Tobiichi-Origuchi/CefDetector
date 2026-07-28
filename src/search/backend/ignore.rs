@@ -17,23 +17,60 @@ struct IgnoreConfig {
     abs_paths: HashSet<PathBuf>,
 }
 
-fn load_ignore_config() -> IgnoreConfig {
-    let mut config = IgnoreConfig::default();
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
+#[cfg(any(test, target_os = "windows"))]
+fn drive_roots_from_mask(mask: u32) -> Vec<PathBuf> {
+    (0..26)
+        .filter(|index| mask & (1 << index) != 0)
+        .map(|index| PathBuf::from(format!("{}:\\", (b'A' + index as u8) as char)))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn search_roots() -> io::Result<Vec<PathBuf>> {
+    Ok(vec![PathBuf::from("/")])
+}
+
+#[cfg(target_os = "windows")]
+fn search_roots() -> io::Result<Vec<PathBuf>> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    // SAFETY: GetLogicalDrives has no parameters and returns a bitmask.
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(drive_roots_from_mask(mask))
+}
+
+#[cfg(target_os = "linux")]
+fn ignore_file_path() -> PathBuf {
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
             PathBuf::from(home).join(".config")
         });
+    config_dir.join("cefdetector").join(".ignore")
+}
 
-    let ignore_file = config_dir.join("cefdetector").join(".ignore");
-    if let Ok(content) = fs::read_to_string(ignore_file) {
+#[cfg(target_os = "windows")]
+fn ignore_file_path() -> PathBuf {
+    let config_dir = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_default();
+    config_dir.join("cefdetector").join(".ignore")
+}
+
+fn load_ignore_config() -> IgnoreConfig {
+    let mut config = IgnoreConfig::default();
+    if let Ok(content) = fs::read_to_string(ignore_file_path()) {
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if line.starts_with('/') {
+            if std::path::Path::new(line).is_absolute() {
                 config.abs_paths.insert(PathBuf::from(line));
             } else {
                 config.dir_names.insert(line.to_owned());
@@ -44,12 +81,67 @@ fn load_ignore_config() -> IgnoreConfig {
     config
 }
 
+#[cfg(target_os = "linux")]
+fn is_platform_excluded(path: &std::path::Path) -> bool {
+    [
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/tmp",
+        "/boot",
+        "/lost+found",
+    ]
+    .iter()
+    .any(|root| path.starts_with(root))
+}
+
+#[cfg(target_os = "windows")]
+fn is_platform_excluded(_path: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn path_is_ignored(config: &IgnoreConfig, path: &std::path::Path) -> bool {
+    config.abs_paths.contains(path)
+}
+
+#[cfg(target_os = "windows")]
+fn path_is_ignored(config: &IgnoreConfig, path: &std::path::Path) -> bool {
+    let path = path.to_string_lossy();
+    config
+        .abs_paths
+        .iter()
+        .any(|ignored| path.eq_ignore_ascii_case(&ignored.to_string_lossy()))
+}
+
+#[cfg(target_os = "linux")]
+fn directory_name_is_ignored(config: &IgnoreConfig, name: &std::ffi::OsStr) -> bool {
+    config.dir_names.contains(name.to_string_lossy().as_ref())
+}
+
+#[cfg(target_os = "windows")]
+fn directory_name_is_ignored(config: &IgnoreConfig, name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    config
+        .dir_names
+        .iter()
+        .any(|ignored| name.eq_ignore_ascii_case(ignored))
+}
+
 impl CandidateSource for IgnoreCandidateSource {
     fn find_candidates(&self) -> io::Result<Vec<ScanCandidate>> {
         let results = Arc::new(Mutex::new(Vec::new()));
         let ignore_config = load_ignore_config();
 
-        let mut builder = WalkBuilder::new("/");
+        let mut roots = search_roots()?.into_iter();
+        let first_root = roots
+            .next()
+            .ok_or_else(|| io::Error::other("no filesystem roots are available to scan"))?;
+        let mut builder = WalkBuilder::new(first_root);
+        for root in roots {
+            builder.add(root);
+        }
         builder
             .standard_filters(false)
             .hidden(false)
@@ -60,18 +152,7 @@ impl CandidateSource for IgnoreCandidateSource {
             )
             .filter_entry(move |entry| {
                 let path = entry.path();
-                if [
-                    "/proc",
-                    "/sys",
-                    "/dev",
-                    "/run",
-                    "/tmp",
-                    "/boot",
-                    "/lost+found",
-                ]
-                .iter()
-                .any(|root| path.starts_with(root))
-                {
+                if is_platform_excluded(path) {
                     return false;
                 }
 
@@ -79,13 +160,11 @@ impl CandidateSource for IgnoreCandidateSource {
                     .file_type()
                     .is_some_and(|file_type| file_type.is_dir())
                 {
-                    if ignore_config.abs_paths.contains(path) {
+                    if path_is_ignored(&ignore_config, path) {
                         return false;
                     }
                     if let Some(name) = path.file_name()
-                        && ignore_config
-                            .dir_names
-                            .contains(name.to_string_lossy().as_ref())
+                        && directory_name_is_ignored(&ignore_config, name)
                     {
                         return false;
                     }
@@ -122,5 +201,20 @@ impl CandidateSource for IgnoreCandidateSource {
         let mut results = std::mem::take(&mut *guard);
         results.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::drive_roots_from_mask;
+
+    #[test]
+    fn windows_drive_mask_maps_to_root_paths() {
+        assert_eq!(
+            drive_roots_from_mask((1 << 2) | (1 << 25)),
+            [PathBuf::from("C:\\"), PathBuf::from("Z:\\")]
+        );
     }
 }
