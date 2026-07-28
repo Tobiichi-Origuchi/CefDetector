@@ -8,9 +8,16 @@ repository = "https://github.com/Tobiichi-Origuchi/CefDetectorLinux"
 edition = "2024"
 rust-version = "1.92.0"
 
+[features]
+# Search backends are compile-time selections; backend.rs enforces exactly one.
+default = ["ignore"]
+ignore = ["dep:ignore"]
+plocate = []
+everything = []
+
 [dependencies]
 pelite = "0.10.0"
-ignore = "0.4.31"
+ignore = { version = "0.4.31", optional = true }
 memchr = "2.8.3"
 memmap2 = "0.9.11"
 backhand = { version = "0.25.1", default-features = false, features = ["gzip", "lz4", "xz", "zstd"] }

@@ -4,28 +4,17 @@ use std::io::{self, Read, Seek};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
-use ignore::{WalkBuilder, WalkState};
 
 use crate::models::AppInfo;
 
+mod backend;
+
+use backend::CandidateKind;
+
 const SIGNATURE_CHUNK_SIZE: usize = 1024 * 1024;
 const SIGNATURE_OVERLAP: usize = 64;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CandidateKind {
-    Pak,
-    Cef,
-    Node,
-}
-
-#[derive(Clone, Debug)]
-struct ScanCandidate {
-    path: PathBuf,
-    kind: CandidateKind,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppKind {
@@ -98,143 +87,12 @@ struct FileIdentity {
     inode: u64,
 }
 
-fn classify_candidate_name(name: &str) -> Option<CandidateKind> {
-    if name.contains("_100_") && name.ends_with(".pak") {
-        Some(CandidateKind::Pak)
-    } else if name == "libcef.so"
-        || name.starts_with("libcef.so.")
-        || name == "libcef.dll"
-        || name == "Chromium Embedded Framework"
-    {
-        Some(CandidateKind::Cef)
-    } else if name == "libnode.so" || name.starts_with("libnode.so.") || name == "libnode.dll" {
-        Some(CandidateKind::Node)
-    } else {
-        None
-    }
-}
-
 pub fn open_path(path: String, is_dir: bool) {
     if path.contains("://") || is_dir {
         let _ = Command::new("xdg-open").arg(path).spawn();
     } else if let Some(parent) = Path::new(&path).parent() {
         let _ = Command::new("xdg-open").arg(parent).spawn();
     }
-}
-
-struct IgnoreConfig {
-    dir_names: HashSet<String>,
-    abs_paths: HashSet<PathBuf>,
-}
-
-fn load_ignore_config() -> IgnoreConfig {
-    let mut config = IgnoreConfig {
-        dir_names: HashSet::new(),
-        abs_paths: HashSet::new(),
-    };
-
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".config")
-        });
-
-    let ignore_file = config_dir.join("cefdetector").join(".ignore");
-    if let Ok(content) = fs::read_to_string(ignore_file) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if line.starts_with('/') {
-                config.abs_paths.insert(PathBuf::from(line));
-            } else {
-                config.dir_names.insert(line.to_owned());
-            }
-        }
-    }
-
-    config
-}
-
-fn single_pass_scan() -> Vec<ScanCandidate> {
-    let results = Arc::new(Mutex::new(Vec::new()));
-    let ignore_config = load_ignore_config();
-
-    let mut builder = WalkBuilder::new("/");
-    builder
-        .standard_filters(false)
-        .hidden(false)
-        .threads(
-            std::thread::available_parallelism()
-                .map(|count| count.get().min(8))
-                .unwrap_or(4),
-        )
-        .filter_entry(move |entry| {
-            let path = entry.path();
-            if [
-                "/proc",
-                "/sys",
-                "/dev",
-                "/run",
-                "/tmp",
-                "/boot",
-                "/lost+found",
-            ]
-            .iter()
-            .any(|root| path.starts_with(root))
-            {
-                return false;
-            }
-
-            if entry
-                .file_type()
-                .is_some_and(|file_type| file_type.is_dir())
-            {
-                if ignore_config.abs_paths.contains(path) {
-                    return false;
-                }
-                if let Some(name) = path.file_name()
-                    && ignore_config
-                        .dir_names
-                        .contains(name.to_string_lossy().as_ref())
-                {
-                    return false;
-                }
-            }
-
-            true
-        });
-
-    builder.build_parallel().run(|| {
-        let results = Arc::clone(&results);
-        Box::new(move |result| {
-            if let Ok(entry) = result
-                && entry
-                    .file_type()
-                    .is_some_and(|file_type| file_type.is_file())
-                && let Some(kind) =
-                    classify_candidate_name(entry.file_name().to_string_lossy().as_ref())
-            {
-                results
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(ScanCandidate {
-                        path: entry.into_path(),
-                        kind,
-                    });
-            }
-            WalkState::Continue
-        })
-    });
-
-    let mut guard = results
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut results = std::mem::take(&mut *guard);
-    results.sort_by(|left, right| left.path.cmp(&right.path));
-    results
 }
 
 fn dir_size(dir: &Path) -> u64 {
@@ -640,12 +498,12 @@ fn is_ignored_candidate(path: &Path) -> bool {
     })
 }
 
-pub fn core_search<F>(mut on_found: F)
+pub fn core_search<F>(mut on_found: F) -> io::Result<()>
 where
     F: FnMut(AppInfo),
 {
     let running_processes = get_running_processes();
-    let candidates = single_pass_scan();
+    let candidates = backend::find_candidates()?;
     let mut standard_dirs: BTreeMap<PathBuf, CandidateFlags> = BTreeMap::new();
     let mut node_dirs = HashSet::new();
 
@@ -723,15 +581,18 @@ where
             is_dir: app.is_dir,
         });
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
+    use super::backend::{CandidateKind, classify_candidate_name};
     use super::{
-        AppKind, CandidateKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, classify_candidate_name,
-        is_relevant_shared_library, scan_signature_reader,
+        AppKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, is_relevant_shared_library,
+        scan_signature_reader,
     };
 
     #[test]

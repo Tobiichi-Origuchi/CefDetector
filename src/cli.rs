@@ -109,9 +109,12 @@ pub fn handle_cli() {
 
     if let Some(fmt) = output_format {
         let mut results = Vec::new();
-        core_search(|info| {
+        if let Err(error) = core_search(|info| {
             results.push(info);
-        });
+        }) {
+            eprintln!("Search failed: {error}");
+            std::process::exit(1);
+        }
 
         let output_str = match fmt {
             OutputFormat::Json => format_json(&results),

@@ -64,6 +64,7 @@ enum SearchMessage {
         count: usize,
         total_size: u64,
     },
+    Failed(String),
 }
 
 struct Frontend {
@@ -161,6 +162,11 @@ impl Frontend {
 
                     // Every visible item owns a TextureHandle, so this lookup-only cache
                     // can be released once the scan is complete.
+                    self.decoded_icons.clear();
+                }
+                SearchMessage::Failed(error) => {
+                    self.search_status = format!("搜索失败：{error}");
+                    self.search_done = true;
                     self.decoded_icons.clear();
                 }
             }
@@ -491,7 +497,7 @@ fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
         let mut batch = Vec::new();
         let mut last_flush = Instant::now();
 
-        core_search(|info| {
+        let search_result = core_search(|info| {
             count += 1;
             total_size += info.size;
 
@@ -522,6 +528,14 @@ fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
                 last_flush = Instant::now();
             }
         });
+
+        if let Err(error) = search_result {
+            let _ = sender.send(SearchMessage::Failed(error.to_string()));
+            ctx.request_repaint();
+            crate::icon_finder::clear_icon_caches();
+            crate::package_manager::clear_pm_cache();
+            return;
+        }
 
         if !batch.is_empty() {
             let _ = sender.send(SearchMessage::Batch {
