@@ -53,5 +53,10 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Validate plocate backend interface
+        run: |
+          cargo test --locked --no-default-features --features plocate --all-targets
+          cargo clippy --locked --no-default-features --features plocate --all-targets -- -D warnings
+
       - name: Build release binary
         run: cargo build --locked --release
