@@ -19,7 +19,7 @@ Check how many CEFs are on your computer
 
 ### Windows
 
-从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载 Windows 压缩包。默认版本直接遍历所有逻辑盘；Everything 版本使用本机索引，需要预先安装并运行 [Everything](https://www.voidtools.com/)，同时启用 IPC。
+从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载 Windows 压缩包。默认版本直接遍历所有逻辑盘；Everything 版本使用本机索引，需要预先安装并运行 [Everything](https://www.voidtools.com/)，同时启用 IPC。图形界面要求显卡驱动提供 OpenGL 2.0 或更高版本；Windows 自带的 OpenGL 1.1 软件回退不满足要求，请安装显卡厂商提供的驱动。
 
 ### Debian
 

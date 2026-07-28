@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -32,6 +33,17 @@ const CELL_HEIGHT: f32 = 128.0;
 
 const SEARCHING_TEXT: &str = "正在全盘搜索 CEF 应用，请耐心等待...";
 const REPOSITORY_TEXT: &str = "Repo: github.com/Tobiichi-Origuchi/CefDetectorLinux (求个STAR!)";
+
+#[derive(Debug)]
+struct GuiError(String);
+
+impl fmt::Display for GuiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GuiError {}
 
 struct PendingItem {
     file: String,
@@ -84,26 +96,26 @@ struct Frontend {
 }
 
 impl Frontend {
-    fn new(ctx: &egui::Context) -> Self {
-        let (regular_font, bold_font) = configure_fonts(ctx);
+    fn new(ctx: &egui::Context) -> Result<Self, GuiError> {
+        let (regular_font, bold_font) = configure_fonts(ctx)?;
 
         let background = load_texture(
             ctx,
             "background",
             decode_raster(include_bytes!("../ui/background.webp"), false)
-                .expect("embedded background.webp must be a valid image"),
+                .ok_or_else(|| GuiError("embedded background.webp is invalid".into()))?,
         );
         let default_icon = load_texture(
             ctx,
             "default-cef-icon",
             decode_raster(include_bytes!("../icons/default_cef_icon.ico"), true)
-                .expect("embedded default_cef_icon.ico must be a valid image"),
+                .ok_or_else(|| GuiError("embedded default_cef_icon.ico is invalid".into()))?,
         );
 
         let (sender, receiver) = mpsc::channel();
         spawn_search(ctx.clone(), sender);
 
-        Self {
+        Ok(Self {
             receiver,
             apps: Vec::new(),
             search_status: SEARCHING_TEXT.into(),
@@ -116,7 +128,7 @@ impl Frontend {
             decoded_icons: HashMap::new(),
             regular_font,
             bold_font,
-        }
+        })
     }
 
     fn receive_search_results(&mut self, ctx: &egui::Context) {
@@ -749,7 +761,7 @@ fn bold_system_fonts() -> Vec<SystemFont> {
     ])
 }
 
-fn configure_fonts(ctx: &egui::Context) -> (FontFamily, FontFamily) {
+fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiError> {
     let regular_family = FontFamily::Name("cefdetector-regular".into());
     let bold_family = FontFamily::Name("cefdetector-bold".into());
     let mut definitions = FontDefinitions::empty();
@@ -769,7 +781,9 @@ fn configure_fonts(ctx: &egui::Context) -> (FontFamily, FontFamily) {
     );
 
     if regular_names.is_empty() {
-        panic!("No supported system sans-serif font was found");
+        return Err(GuiError(
+            "no supported system sans-serif font was found".into(),
+        ));
     }
     if bold_names.is_empty() {
         bold_names.clone_from(&regular_names);
@@ -787,7 +801,7 @@ fn configure_fonts(ctx: &egui::Context) -> (FontFamily, FontFamily) {
     definitions.families.insert(bold_family.clone(), bold_names);
     ctx.set_fonts(definitions);
 
-    (regular_family, bold_family)
+    Ok((regular_family, bold_family))
 }
 
 fn add_system_fonts(
@@ -835,6 +849,123 @@ fn window_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(image.into_raw(), width, height).ok()
 }
 
+struct EguiRenderer {
+    egui_ctx: egui::Context,
+    egui_winit: egui_glow::egui_winit::State,
+    painter: egui_glow::Painter,
+    viewport_info: egui::ViewportInfo,
+    shapes: Vec<egui::epaint::ClippedShape>,
+    pixels_per_point: f32,
+    textures_delta: egui::TexturesDelta,
+}
+
+impl EguiRenderer {
+    fn new(
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        gl: Arc<egui_glow::glow::Context>,
+    ) -> Result<Self, GuiError> {
+        use egui_glow::glow::HasContext as _;
+
+        // These three values exist since OpenGL 1.1, so they are safe to query
+        // before egui_glow verifies its OpenGL 2.0 minimum.
+        let graphics = unsafe {
+            format!(
+                "version {:?}, renderer {:?}, vendor {:?}",
+                gl.get_parameter_string(egui_glow::glow::VERSION),
+                gl.get_parameter_string(egui_glow::glow::RENDERER),
+                gl.get_parameter_string(egui_glow::glow::VENDOR),
+            )
+        };
+        let painter = egui_glow::Painter::new(Arc::clone(&gl), "", None, true).map_err(|error| {
+            let platform_hint = if cfg!(target_os = "windows") {
+                " Windows requires a graphics driver that exposes OpenGL 2.0 or newer; \
+                 the Microsoft OpenGL 1.1 fallback is not sufficient."
+            } else {
+                ""
+            };
+            GuiError(format!(
+                "failed to initialize the GUI renderer: {error}; detected OpenGL {graphics}.{platform_hint}"
+            ))
+        })?;
+        let egui_ctx = egui::Context::default();
+        let egui_winit = egui_glow::egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            event_loop,
+            None,
+            event_loop.system_theme(),
+            Some(painter.max_texture_side()),
+        );
+
+        Ok(Self {
+            egui_ctx,
+            egui_winit,
+            painter,
+            viewport_info: Default::default(),
+            shapes: Default::default(),
+            pixels_per_point: 1.0,
+            textures_delta: Default::default(),
+        })
+    }
+
+    fn on_window_event(
+        &mut self,
+        window: &winit::window::Window,
+        event: &winit::event::WindowEvent,
+    ) -> egui_glow::egui_winit::EventResponse {
+        self.egui_winit.on_window_event(window, event)
+    }
+
+    fn run(&mut self, window: &winit::window::Window, run_ui: impl FnMut(&mut egui::Ui)) {
+        let raw_input = self.egui_winit.take_egui_input(window);
+        let egui::FullOutput {
+            platform_output,
+            textures_delta,
+            shapes,
+            pixels_per_point,
+            viewport_output,
+        } = self.egui_ctx.run_ui(raw_input, run_ui);
+
+        for (_, egui::ViewportOutput { commands, .. }) in viewport_output {
+            let mut actions_requested = Default::default();
+            egui_glow::egui_winit::process_viewport_commands(
+                &self.egui_ctx,
+                &mut self.viewport_info,
+                commands,
+                window,
+                &mut actions_requested,
+            );
+        }
+        self.egui_winit
+            .handle_platform_output(window, platform_output);
+        self.shapes = shapes;
+        self.pixels_per_point = pixels_per_point;
+        self.textures_delta.append(textures_delta);
+    }
+
+    fn paint(&mut self, window: &winit::window::Window) {
+        let shapes = std::mem::take(&mut self.shapes);
+        let mut textures_delta = std::mem::take(&mut self.textures_delta);
+
+        for (id, image_delta) in textures_delta.set {
+            self.painter.set_texture(id, &image_delta);
+        }
+        let clipped_primitives = self.egui_ctx.tessellate(shapes, self.pixels_per_point);
+        self.painter.paint_primitives(
+            window.inner_size().into(),
+            self.pixels_per_point,
+            &clipped_primitives,
+        );
+        for id in textures_delta.free.drain(..) {
+            self.painter.free_texture(id);
+        }
+    }
+
+    fn destroy(&mut self) {
+        self.painter.destroy();
+    }
+}
+
 struct GlutinWindow {
     window: winit::window::Window,
     context: PossiblyCurrentContext,
@@ -843,7 +974,8 @@ struct GlutinWindow {
 }
 
 impl GlutinWindow {
-    fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> Self {
+    fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<Self, GuiError> {
+        use glutin::config::GlConfig as _;
         use glutin::context::NotCurrentGlContext as _;
         use glutin::display::{GetGlDisplay as _, GlDisplay as _};
         use glutin::prelude::GlSurface as _;
@@ -862,7 +994,6 @@ impl GlutinWindow {
         };
 
         let config_template = glutin::config::ConfigTemplateBuilder::new()
-            .prefer_hardware_accelerated(Some(true))
             .with_depth_size(0)
             .with_stencil_size(0)
             .with_multisampling(0)
@@ -871,40 +1002,73 @@ impl GlutinWindow {
         let (mut window, config) = glutin_winit::DisplayBuilder::new()
             .with_preference(glutin_winit::ApiPreference::FallbackEgl)
             .with_window_attributes(Some(window_attributes.clone()))
-            .build(event_loop, config_template, |mut configs| {
+            .build(event_loop, config_template, |configs| {
                 configs
-                    .next()
+                    .reduce(|current, candidate| {
+                        if candidate.hardware_accelerated() && !current.hardware_accelerated() {
+                            candidate
+                        } else {
+                            current
+                        }
+                    })
                     .expect("no compatible OpenGL framebuffer configuration")
             })
-            .expect("failed to choose an OpenGL framebuffer configuration");
+            .map_err(|error| {
+                GuiError(format!(
+                    "failed to choose an OpenGL framebuffer configuration: {error}"
+                ))
+            })?;
 
         let display = config.display();
         let raw_window_handle = window
             .as_ref()
-            .map(|window| window.window_handle().expect("window handle").as_raw());
-        let context_attributes =
-            glutin::context::ContextAttributesBuilder::new().build(raw_window_handle);
+            .map(|window| {
+                window
+                    .window_handle()
+                    .map(|handle| handle.as_raw())
+                    .map_err(|error| GuiError(format!("failed to obtain window handle: {error}")))
+            })
+            .transpose()?;
+        let context_attributes = glutin::context::ContextAttributesBuilder::new()
+            .with_context_api(glutin::context::ContextApi::OpenGl(Some(
+                glutin::context::Version::new(2, 0),
+            )))
+            .build(raw_window_handle);
         let fallback_attributes = glutin::context::ContextAttributesBuilder::new()
-            .with_context_api(glutin::context::ContextApi::Gles(None))
+            .with_context_api(glutin::context::ContextApi::Gles(Some(
+                glutin::context::Version::new(2, 0),
+            )))
             .build(raw_window_handle);
 
         // SAFETY: The attributes use the live window handle returned by winit and
         // the context remains owned alongside that window and display.
-        let not_current = unsafe {
-            display
-                .create_context(&config, &context_attributes)
-                .or_else(|_| display.create_context(&config, &fallback_attributes))
-                .expect("failed to create an OpenGL or OpenGL ES context")
-        };
+        let not_current = unsafe { display.create_context(&config, &context_attributes) }.or_else(
+            |desktop_error| {
+                // SAFETY: This uses the same live window handle and GL config.
+                unsafe { display.create_context(&config, &fallback_attributes) }.map_err(
+                    |gles_error| {
+                        GuiError(format!(
+                            "failed to create an OpenGL 2.0 context ({desktop_error}) \
+                             or an OpenGL ES 2.0 context ({gles_error})"
+                        ))
+                    },
+                )
+            },
+        )?;
 
-        let window = window.take().unwrap_or_else(|| {
+        let window = if let Some(window) = window.take() {
+            window
+        } else {
             glutin_winit::finalize_window(event_loop, window_attributes, &config)
-                .expect("failed to create the native window")
-        });
+                .map_err(|error| GuiError(format!("failed to create the native window: {error}")))?
+        };
         let size = window.inner_size();
+        let window_handle = window
+            .window_handle()
+            .map_err(|error| GuiError(format!("failed to obtain window handle: {error}")))?;
         let surface_attributes = glutin::surface::SurfaceAttributesBuilder::<WindowSurface>::new()
             .build(
-                window.window_handle().expect("window handle").as_raw(),
+                window_handle.as_raw(),
                 NonZeroU32::new(size.width).unwrap_or(NonZeroU32::MIN),
                 NonZeroU32::new(size.height).unwrap_or(NonZeroU32::MIN),
             );
@@ -913,22 +1077,28 @@ impl GlutinWindow {
         let surface = unsafe {
             display
                 .create_window_surface(&config, &surface_attributes)
-                .expect("failed to create the OpenGL window surface")
+                .map_err(|error| {
+                    GuiError(format!(
+                        "failed to create the OpenGL window surface: {error}"
+                    ))
+                })?
         };
-        let context = not_current
-            .make_current(&surface)
-            .expect("failed to make the OpenGL context current");
+        let context = not_current.make_current(&surface).map_err(|error| {
+            GuiError(format!(
+                "failed to make the OpenGL context current: {error}"
+            ))
+        })?;
         let _ = surface.set_swap_interval(
             &context,
             glutin::surface::SwapInterval::Wait(NonZeroU32::MIN),
         );
 
-        Self {
+        Ok(Self {
             window,
             context,
             display,
             surface,
-        }
+        })
     }
 
     fn resize(&self, size: winit::dpi::PhysicalSize<u32>) {
@@ -941,11 +1111,11 @@ impl GlutinWindow {
         );
     }
 
-    fn swap_buffers(&self) {
+    fn swap_buffers(&self) -> Result<(), GuiError> {
         use glutin::surface::GlSurface as _;
         self.surface
             .swap_buffers(&self.context)
-            .expect("failed to swap OpenGL buffers");
+            .map_err(|error| GuiError(format!("failed to swap OpenGL buffers: {error}")))
     }
 
     fn proc_address(&self, symbol: &std::ffi::CStr) -> *const std::ffi::c_void {
@@ -963,8 +1133,10 @@ struct GlowApplication {
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     gl_window: Option<GlutinWindow>,
     gl: Option<Arc<egui_glow::glow::Context>>,
-    egui: Option<egui_glow::EguiGlow>,
+    egui: Option<EguiRenderer>,
     frontend: Option<Frontend>,
+    error: Option<GuiError>,
+    exit_after_first_frame: bool,
 }
 
 impl GlowApplication {
@@ -975,26 +1147,80 @@ impl GlowApplication {
             gl: None,
             egui: None,
             frontend: None,
+            error: None,
+            exit_after_first_frame: std::env::var_os("CEFDETECTOR_GUI_SMOKE_TEST").is_some(),
         }
     }
 
-    fn redraw(&mut self) {
-        let gl_window = self.gl_window.as_ref().expect("GL window");
-        let frontend = self.frontend.as_mut().expect("frontend");
-        let egui = self.egui.as_mut().expect("egui");
+    fn initialize(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> Result<(), GuiError> {
+        let gl_window = GlutinWindow::new(event_loop)?;
+        // SAFETY: The loader resolves symbols from the current context created above.
+        let gl = unsafe {
+            egui_glow::glow::Context::from_loader_function(|symbol| {
+                let Ok(symbol) = std::ffi::CString::new(symbol) else {
+                    return std::ptr::null();
+                };
+                gl_window.proc_address(&symbol)
+            })
+        };
+        let gl = Arc::new(gl);
+        let mut egui = EguiRenderer::new(event_loop, Arc::clone(&gl))?;
+
+        let proxy = self.proxy.clone();
+        egui.egui_ctx.set_request_repaint_callback(move |request| {
+            let _ = proxy.send_event(UserEvent::Repaint(request.delay));
+        });
+        let frontend = match Frontend::new(&egui.egui_ctx) {
+            Ok(frontend) => frontend,
+            Err(error) => {
+                egui.destroy();
+                return Err(error);
+            }
+        };
+
+        self.frontend = Some(frontend);
+        self.egui = Some(egui);
+        self.gl = Some(gl);
+        gl_window.window.request_redraw();
+        self.gl_window = Some(gl_window);
+        Ok(())
+    }
+
+    fn redraw(&mut self) -> Result<(), GuiError> {
+        let gl_window = self
+            .gl_window
+            .as_ref()
+            .ok_or_else(|| GuiError("GUI redraw requested before window initialization".into()))?;
+        let frontend = self.frontend.as_mut().ok_or_else(|| {
+            GuiError("GUI redraw requested before frontend initialization".into())
+        })?;
+        let egui = self.egui.as_mut().ok_or_else(|| {
+            GuiError("GUI redraw requested before renderer initialization".into())
+        })?;
 
         egui.run(&gl_window.window, |ui| frontend.ui(ui));
 
         // SAFETY: This GL context is current on the event-loop thread.
         unsafe {
             use egui_glow::glow::HasContext as _;
-            let gl = self.gl.as_ref().expect("GL context");
+            let gl = self.gl.as_ref().ok_or_else(|| {
+                GuiError("GUI redraw requested before OpenGL initialization".into())
+            })?;
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(egui_glow::glow::COLOR_BUFFER_BIT);
         }
         egui.paint(&gl_window.window);
-        gl_window.swap_buffers();
+        gl_window.swap_buffers()?;
         gl_window.window.set_visible(true);
+        Ok(())
+    }
+
+    fn fail(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, error: GuiError) {
+        self.error = Some(error);
+        event_loop.exit();
     }
 }
 
@@ -1004,28 +1230,9 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
             return;
         }
 
-        let gl_window = GlutinWindow::new(event_loop);
-        // SAFETY: The loader resolves symbols from the current context created above.
-        let gl = unsafe {
-            egui_glow::glow::Context::from_loader_function(|symbol| {
-                let symbol = std::ffi::CString::new(symbol).expect("OpenGL symbol contains NUL");
-                gl_window.proc_address(&symbol)
-            })
-        };
-        let gl = Arc::new(gl);
-        let egui = egui_glow::EguiGlow::new(event_loop, Arc::clone(&gl), None, None, true);
-
-        let proxy = self.proxy.clone();
-        egui.egui_ctx.set_request_repaint_callback(move |request| {
-            let _ = proxy.send_event(UserEvent::Repaint(request.delay));
-        });
-        let frontend = Frontend::new(&egui.egui_ctx);
-
-        self.frontend = Some(frontend);
-        self.egui = Some(egui);
-        self.gl = Some(gl);
-        self.gl_window = Some(gl_window);
-        self.gl_window.as_ref().unwrap().window.request_redraw();
+        if let Err(error) = self.initialize(event_loop) {
+            self.fail(event_loop, error);
+        }
     }
 
     fn window_event(
@@ -1047,18 +1254,21 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
                 return;
             }
             winit::event::WindowEvent::RedrawRequested => {
-                self.redraw();
+                match self.redraw() {
+                    Ok(()) if self.exit_after_first_frame => event_loop.exit(),
+                    Ok(()) => {}
+                    Err(error) => self.fail(event_loop, error),
+                }
                 return;
             }
             winit::event::WindowEvent::Resized(size) => gl_window.resize(*size),
             _ => {}
         }
 
-        let response = self
-            .egui
-            .as_mut()
-            .expect("egui")
-            .on_window_event(&gl_window.window, &event);
+        let Some(egui) = self.egui.as_mut() else {
+            return;
+        };
+        let response = egui.on_window_event(&gl_window.window, &event);
         if response.repaint {
             gl_window.window.request_redraw();
         }
@@ -1099,6 +1309,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let proxy = event_loop.create_proxy();
     let mut app = GlowApplication::new(proxy);
     event_loop.run_app(&mut app)?;
+    if let Some(error) = app.error {
+        return Err(Box::new(error));
+    }
     Ok(())
 }
 
