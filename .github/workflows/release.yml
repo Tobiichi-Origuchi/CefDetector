@@ -111,6 +111,7 @@ jobs:
             libfontconfig1-dev \
             libgl1-mesa-dri \
             libglx-mesa0 \
+            libxkbcommon-x11-0 \
             pkg-config \
             xauth \
             xvfb
