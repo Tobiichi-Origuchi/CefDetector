@@ -6,9 +6,6 @@ use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM,
@@ -17,9 +14,9 @@ use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    FindWindowW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, MSG, MSGFLT_ALLOW,
-    RegisterClassExW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, SetWindowLongPtrW, TranslateMessage,
-    WM_COPYDATA, WNDCLASSEXW,
+    FindWindowW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, KillTimer, MSG, MSGFLT_ALLOW,
+    RegisterClassExW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, SetTimer, SetWindowLongPtrW,
+    TranslateMessage, WM_COPYDATA, WM_TIMER, WNDCLASSEXW,
 };
 
 use super::everything_protocol::{ITEM_FLAG_FOLDER, encode_query, parse_reply};
@@ -30,11 +27,10 @@ const REPLY_WINDOW_CLASS: &str = "CEFDETECTOR_EVERYTHING_IPC";
 const EVERYTHING_COPYDATA_QUERY_W: usize = 2;
 const QUERY_REPLY_ID: usize = 0x4345_4644;
 const SEND_TIMEOUT_MS: u32 = 5_000;
-const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLY_TIMEOUT_MS: u32 = 30_000;
+const REPLY_TIMER_ID: usize = 1;
 const MAX_REPLY_BYTES: usize = 128 * 1024 * 1024;
 const SEARCH: &str = r#"file: <_100_|libcef|libnode|"Chromium Embedded Framework">"#;
-
-static QUERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 pub(super) struct EverythingCandidateSource;
@@ -44,25 +40,18 @@ struct QueryState {
     response: Option<io::Result<Vec<u8>>>,
 }
 
-struct QueryPermit;
-
-impl QueryPermit {
-    fn acquire() -> io::Result<Self> {
-        QUERY_ACTIVE
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self)
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "an Everything query is already in progress",
-                )
-            })
-    }
+struct WindowTimer {
+    window: HWND,
+    id: usize,
 }
 
-impl Drop for QueryPermit {
+impl Drop for WindowTimer {
     fn drop(&mut self) {
-        QUERY_ACTIVE.store(false, Ordering::Release);
+        // SAFETY: The timer belongs to this live window and thread. It is fine
+        // if the timer has already expired but its message has not been handled.
+        unsafe {
+            KillTimer(self.window, self.id);
+        }
     }
 }
 
@@ -269,6 +258,22 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
         return response;
     }
 
+    // A window timer wakes GetMessageW even if Everything accepts the query and
+    // then exits or otherwise fails to send a reply. Keeping the timeout inside
+    // this thread avoids leaking a permanently blocked detached worker.
+    // SAFETY: reply_window is live and owned by the current thread.
+    let timer_id = unsafe { SetTimer(reply_window.0, REPLY_TIMER_ID, REPLY_TIMEOUT_MS, None) };
+    if timer_id == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let _timer = WindowTimer {
+        window: reply_window.0,
+        id: timer_id,
+    };
+    if let Some(response) = state.response.take() {
+        return response;
+    }
+
     loop {
         let mut message = MSG::default();
         // SAFETY: message points to writable storage and the current thread owns
@@ -283,6 +288,21 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
                 "Everything IPC message loop ended before a reply arrived",
             ));
         }
+        // GetMessageW dispatches cross-thread sent messages before returning a
+        // queued message. A WM_COPYDATA reply can therefore already be stored
+        // even when the returned message is the timeout timer.
+        if let Some(response) = state.response.take() {
+            return response;
+        }
+        if message.hwnd == reply_window.0
+            && message.message == WM_TIMER
+            && message.wParam == timer_id
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Everything did not return search results within 30 seconds",
+            ));
+        }
         // SAFETY: message was initialized by GetMessageW.
         unsafe {
             TranslateMessage(&message);
@@ -294,31 +314,9 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
     }
 }
 
-fn query_with_timeout() -> io::Result<Vec<u8>> {
-    let permit = QueryPermit::acquire()?;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("everything-ipc".into())
-        .spawn(move || {
-            let _permit = permit;
-            let _ = sender.send(run_ipc_query());
-        })?;
-
-    match receiver.recv_timeout(REPLY_TIMEOUT) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Everything did not return search results within 30 seconds",
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
-            "Everything IPC worker stopped without returning a result",
-        )),
-    }
-}
-
 impl CandidateSource for EverythingCandidateSource {
     fn find_candidates(&self) -> io::Result<Vec<ScanCandidate>> {
-        let reply = query_with_timeout()?;
+        let reply = run_ipc_query()?;
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
 
