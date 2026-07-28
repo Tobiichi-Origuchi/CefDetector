@@ -18,8 +18,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test and build
+  linux:
+    name: Linux
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -60,3 +60,58 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release
+
+  windows:
+    name: Windows (${{ matrix.backend }})
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: ignore
+            cargo_args: ""
+          - backend: everything
+            cargo_args: --no-default-features --features everything
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+        with:
+          components: clippy
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          key: ${{ matrix.backend }}
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Run tests
+        run: cargo test --locked ${{ matrix.cargo_args }} --all-targets
+
+      - name: Run Clippy
+        run: cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --locked --release ${{ matrix.cargo_args }}
+
+      - name: Stage executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -LiteralPath target/release/cefdetector.exe `
+            -Destination "dist/cefdetector-${{ matrix.backend }}.exe"
+
+      - name: Upload executable
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cefdetector-windows-x86_64-${{ matrix.backend }}
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 7
