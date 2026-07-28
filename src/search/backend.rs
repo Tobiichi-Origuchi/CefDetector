@@ -73,7 +73,6 @@ pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
     ActiveCandidateSource.find_candidates()
 }
 
-#[cfg_attr(not(feature = "ignore"), allow(dead_code))]
 pub(super) fn classify_candidate_name(name: &str) -> Option<CandidateKind> {
     if name.contains("_100_") && name.ends_with(".pak") {
         Some(CandidateKind::Pak)
