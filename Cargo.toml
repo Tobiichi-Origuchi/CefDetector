@@ -34,7 +34,7 @@ glutin-winit = { version = "0.5.0", default-features = false, features = ["egl",
 egui_glow = { version = "0.35.0", default-features = false, features = ["winit"] }
 glutin = { version = "0.32.3", default-features = false, features = ["wgl"] }
 glutin-winit = { version = "0.5.0", default-features = false, features = ["wgl"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [package.metadata.packager]
 identifier = "cefdetector"

@@ -1,10 +1,10 @@
-# CEF Detector Linux - 一眼CEF Linux: 年轻人的第一款 Linux CEF检测器 [![CI](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
+# CEF Detector - 一眼 CEF [![CI](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
 
-Check how many CEFs are on your Linux
+Check how many CEFs are on your computer
 
-**[使用 rust 编写，专为 Linux 打造]**
+**[使用 Rust 编写，支持 Linux 和 Windows]**
 
-看看你电脑 **(Linux)** 上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
+看看你的电脑上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
 
 > [!Note]
 > 欢迎你把程序截图发到 [Discussions](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/discussions) 中, 看看谁才是真的 **《超级CEF王》**
@@ -16,6 +16,10 @@ Check how many CEFs are on your Linux
 ![Screenshot](./screenshot.webp)
 
 ## 安装
+
+### Windows
+
+从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载 Windows 压缩包。默认版本直接遍历所有逻辑盘；Everything 版本使用本机索引，需要预先安装并运行 [Everything](https://www.voidtools.com/)，同时启用 IPC。
 
 ### Debian
 
@@ -60,7 +64,7 @@ cefdetector --json
 
 通过创建一个配置文件来忽略特定目录
 
-例如在 `~/.config/cefdetector/.ignore`（或 `$XDG_CONFIG_HOME/cefdetector/.ignore`）中：
+Linux 配置文件位于 `~/.config/cefdetector/.ignore`（或 `$XDG_CONFIG_HOME/cefdetector/.ignore`），Windows 配置文件位于 `%APPDATA%\cefdetector\.ignore`：
 
 ```gitignore
 # 忽略目录名称（跳过所有名为 target 和 node_modules 的目录）
@@ -69,12 +73,15 @@ node_modules
 
 # 忽略绝对路径
 /home/user/myproject/build
+
+# Windows 绝对路径
+D:\Games\build
 ```
 
 ## 特性
 
 - 检测 CEF 的类型: 如 [libcef](https://github.com/chromiumembedded/cef)、[Electron](https://www.electronjs.org/)、[NWJS](https://nwjs.io/)、[CefSharp](http://cefsharp.github.io/)、[MiniBlink](https://github.com/weolar/miniblink49)、[MiniElectron](https://github.com/weolar/miniblink49)、[Edge](https://www.microsoft.com/en-us/edge) 和 [Chrome](https://www.google.com/chrome/)
-- 检测应用图标: 通过解析 PE、AppImage、同级目录、快捷方式、包管理器（目前仅支持 APT/Pacman/RPM/Portage/Flatpak/Snap/Nix/Brew）
+- 检测应用图标: 通过解析 PE、AppImage、同级目录、快捷方式、Linux 包管理器（APT/Pacman/RPM/Portage/Flatpak/Snap/Nix/Brew）
 - 显示总空间占用
 - 显示当前所运行的进程 (绿色文件名)
 - 单独显示每个程序的空间占用并按大小排序

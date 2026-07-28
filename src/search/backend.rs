@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "everything")]
 mod everything;
+#[cfg(any(test, feature = "everything"))]
+mod everything_protocol;
 #[cfg(feature = "ignore")]
 mod ignore;
 #[cfg(feature = "plocate")]
