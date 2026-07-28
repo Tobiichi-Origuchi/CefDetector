@@ -29,11 +29,14 @@ Check how many CEFs are on your Linux
 yay/paru -S cefdetector-bin
 ```
 
-优先使用系统文件索引的 plocate 后端（未被索引的 Home 或其内部挂载点会自动回退遍历）：
+使用基于系统文件索引的 plocate 后端：
 
 ```bash
 yay/paru -S cefdetector-plocate-bin
 ```
+
+> [!NOTE]
+> plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测；它也不保证一定比默认后端更快。
 
 ## 使用
 
