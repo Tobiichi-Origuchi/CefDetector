@@ -316,7 +316,15 @@ fn get_running_processes() -> HashSet<String> {
 #[cfg(target_os = "windows")]
 fn normalize_windows_path(path: &Path) -> String {
     let path = path.to_string_lossy().replace('/', "\\");
-    path.strip_prefix(r"\\?\").unwrap_or(&path).to_lowercase()
+    let path = if path
+        .get(.."\\\\?\\UNC\\".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+    {
+        format!(r"\\{}", &path[r"\\?\UNC\".len()..])
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()
+    };
+    path.to_lowercase()
 }
 
 #[cfg(target_os = "linux")]
@@ -744,6 +752,8 @@ mod tests {
     use super::backend::{CandidateKind, classify_candidate_name};
     #[cfg(target_os = "windows")]
     use super::explorer_select_argument;
+    #[cfg(target_os = "windows")]
+    use super::normalize_windows_path;
     use super::{
         AppKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, is_relevant_shared_library,
         scan_signature_reader,
@@ -756,6 +766,19 @@ mod tests {
         assert_eq!(
             explorer_select_argument(path),
             r#"/select,"C:\Program Files (x86)\示例 应用\应用程序.exe""#
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_normalization_preserves_unc_roots() {
+        assert_eq!(
+            normalize_windows_path(std::path::Path::new(r"\\?\UNC\Server\Share\App.exe")),
+            r"\\server\share\app.exe"
+        );
+        assert_eq!(
+            normalize_windows_path(std::path::Path::new(r"\\?\C:/Apps/App.exe")),
+            r"c:\apps\app.exe"
         );
     }
 
