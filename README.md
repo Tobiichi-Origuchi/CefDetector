@@ -29,7 +29,7 @@ Check how many CEFs are on your Linux
 yay/paru -S cefdetector-bin
 ```
 
-使用速度更快、依赖系统文件索引的 plocate 后端：
+优先使用系统文件索引的 plocate 后端（未被索引的 Home 或其内部挂载点会自动回退遍历）：
 
 ```bash
 yay/paru -S cefdetector-plocate-bin

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "everything")]
 mod everything;
+#[cfg(any(feature = "ignore", feature = "plocate"))]
+mod filesystem;
 #[cfg(feature = "ignore")]
 mod ignore;
 #[cfg(feature = "plocate")]
