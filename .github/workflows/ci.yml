@@ -37,7 +37,13 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libfontconfig1-dev pkg-config
+          sudo apt-get install --yes --no-install-recommends \
+            libfontconfig1-dev \
+            libgl1-mesa-dri \
+            libglx-mesa0 \
+            pkg-config \
+            xauth \
+            xvfb
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -60,6 +66,13 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release
+
+      - name: Test GUI startup
+        run: |
+          xvfb-run --auto-servernum env \
+            CEFDETECTOR_GUI_SMOKE_TEST=1 \
+            LIBGL_ALWAYS_SOFTWARE=1 \
+            target/release/cefdetector
 
   windows:
     name: Windows (${{ matrix.backend }})
