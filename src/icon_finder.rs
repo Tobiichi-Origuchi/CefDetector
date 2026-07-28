@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -19,12 +21,15 @@ static DEFAULT_ICON: LazyLock<RawIcon> = LazyLock::new(|| {
 static RAW_ICON_CACHE: LazyLock<Mutex<HashMap<PathBuf, RawIcon>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(target_os = "linux")]
 static DESKTOP_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(target_os = "linux")]
 static DESKTOP_INDEX: LazyLock<Mutex<Option<HashMap<String, String>>>> =
     LazyLock::new(|| Mutex::new(None));
 
+#[cfg(target_os = "linux")]
 static ICON_THEME_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -45,6 +50,7 @@ fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub fn find_icon_in_theme(icon_name: &str) -> Option<PathBuf> {
     if let Some(cached) = ICON_THEME_CACHE.lock().unwrap().get(icon_name) {
         return cached.clone();
@@ -154,6 +160,7 @@ pub fn find_neighboring_icon(exe_path: &Path) -> Option<PathBuf> {
     result
 }
 
+#[cfg(target_os = "linux")]
 pub fn find_icon_via_desktop_file(exe_path: &Path) -> Option<PathBuf> {
     if let Some(cached) = DESKTOP_CACHE.lock().unwrap().get(exe_path) {
         return cached.clone();
@@ -182,6 +189,7 @@ pub fn find_icon_via_desktop_file(exe_path: &Path) -> Option<PathBuf> {
     result
 }
 
+#[cfg(target_os = "linux")]
 fn desktop_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
@@ -209,6 +217,7 @@ fn desktop_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(target_os = "linux")]
 fn desktop_exec_tokens(command: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
@@ -252,6 +261,7 @@ fn desktop_exec_tokens(command: &str) -> Vec<String> {
     tokens
 }
 
+#[cfg(target_os = "linux")]
 fn executable_name(command: &str) -> Option<String> {
     let tokens = desktop_exec_tokens(command);
     let mut tokens = tokens.iter().map(String::as_str);
@@ -267,6 +277,7 @@ fn executable_name(command: &str) -> Option<String> {
         .map(|name| name.to_string_lossy().to_ascii_lowercase())
 }
 
+#[cfg(target_os = "linux")]
 fn parse_desktop_entry(content: &str) -> Option<(Vec<String>, String)> {
     let mut in_desktop_entry = false;
     let mut executable_names = Vec::new();
@@ -301,6 +312,7 @@ fn parse_desktop_entry(content: &str) -> Option<(Vec<String>, String)> {
     (!executable_names.is_empty()).then_some((executable_names, icon))
 }
 
+#[cfg(target_os = "linux")]
 fn build_desktop_index() -> HashMap<String, String> {
     let mut index = HashMap::new();
     for dir in desktop_search_dirs() {
@@ -496,10 +508,13 @@ pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
 /// Release all icon-lookup caches. Call once after scan completes.
 pub fn clear_icon_caches() {
     RAW_ICON_CACHE.lock().unwrap().clear();
-    DESKTOP_CACHE.lock().unwrap().clear();
-    *DESKTOP_INDEX.lock().unwrap() = None;
-    ICON_THEME_CACHE.lock().unwrap().clear();
     NEIGHBOR_ICON_CACHE.lock().unwrap().clear();
+    #[cfg(target_os = "linux")]
+    {
+        DESKTOP_CACHE.lock().unwrap().clear();
+        *DESKTOP_INDEX.lock().unwrap() = None;
+        ICON_THEME_CACHE.lock().unwrap().clear();
+    }
 }
 
 pub fn get_app_icon(path: String) -> RawIcon {
@@ -562,7 +577,7 @@ pub fn get_app_icon(path: String) -> RawIcon {
     icon
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{desktop_exec_tokens, executable_name, parse_desktop_entry};
 
