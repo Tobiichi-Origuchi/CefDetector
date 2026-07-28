@@ -996,7 +996,6 @@ impl GlutinWindow {
         let config_template = glutin::config::ConfigTemplateBuilder::new()
             .with_depth_size(0)
             .with_stencil_size(0)
-            .with_multisampling(0)
             .with_transparency(false);
 
         let (mut window, config) = glutin_winit::DisplayBuilder::new()
