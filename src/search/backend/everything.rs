@@ -15,8 +15,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     FindWindowW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, KillTimer, MSG, MSGFLT_ALLOW,
-    RegisterClassExW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, SetTimer, SetWindowLongPtrW,
-    TranslateMessage, WM_COPYDATA, WM_TIMER, WNDCLASSEXW,
+    PostMessageW, RegisterClassExW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, SetTimer,
+    SetWindowLongPtrW, TranslateMessage, WM_APP, WM_COPYDATA, WM_TIMER, WNDCLASSEXW,
 };
 
 use super::everything_protocol::{ITEM_FLAG_FOLDER, encode_query, parse_reply};
@@ -29,6 +29,7 @@ const QUERY_REPLY_ID: usize = 0x4345_4644;
 const SEND_TIMEOUT_MS: u32 = 5_000;
 const REPLY_TIMEOUT_MS: u32 = 30_000;
 const REPLY_TIMER_ID: usize = 1;
+const REPLY_RECEIVED_MESSAGE: u32 = WM_APP + 1;
 const MAX_REPLY_BYTES: usize = 128 * 1024 * 1024;
 const SEARCH: &str = r#"file: <_100_|libcef|libnode|"Chromium Embedded Framework">"#;
 
@@ -115,6 +116,13 @@ unsafe extern "system" fn reply_window_proc(
                 // window's thread while messages are dispatched.
                 unsafe {
                     (*state).response = Some(result);
+                }
+                // GetMessageW dispatches this sent WM_COPYDATA internally but
+                // does not return until a queued message is available. Posting
+                // a private wake-up message lets the query observe the reply
+                // immediately instead of waiting for the timeout timer.
+                unsafe {
+                    PostMessageW(window, REPLY_RECEIVED_MESSAGE, 0, 0);
                 }
                 return 1;
             }
