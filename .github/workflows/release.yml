@@ -20,7 +20,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_PACKAGER_VERSION: 0.11.8
 
 jobs:
   metadata:
@@ -112,6 +111,7 @@ jobs:
             libgl1-mesa-dri \
             libglx-mesa0 \
             libxkbcommon-x11-0 \
+            plocate \
             pkg-config \
             xauth \
             xvfb
@@ -121,46 +121,48 @@ jobs:
         with:
           shared-key: release
 
-      - name: Validate release source
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Validate ignore backend
         run: |
-          cargo fmt --all -- --check
           cargo test --locked --all-targets
           cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Validate plocate backend
+        run: |
           cargo test --locked --no-default-features --features plocate --all-targets
           cargo clippy --locked --no-default-features --features plocate --all-targets -- -D warnings
 
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --version "=${CARGO_PACKAGER_VERSION}" --locked
+      - name: Build Linux archives
+        env:
+          PACKAGE_OUTPUT_DIR: dist
+        run: ./.github/scripts/package-linux.sh "${{ needs.metadata.outputs.version }}"
 
-      - name: Build packages
-        run: cargo packager --release
-
-      - name: Test GUI startup
+      - name: Test packaged GUI binaries
         timeout-minutes: 2
         run: |
-          xvfb-run --auto-servernum env \
-            CEFDETECTOR_GUI_SMOKE_TEST=1 \
-            LIBGL_ALWAYS_SOFTWARE=1 \
-            target/release/cefdetector
+          set -euo pipefail
+          for backend in ignore plocate; do
+            xvfb-run --auto-servernum env \
+              CEFDETECTOR_GUI_SMOKE_TEST=1 \
+              LIBGL_ALWAYS_SOFTWARE=1 \
+              "target/release/package-binaries/cefdetector-${backend}"
+          done
 
-      - name: Build plocate package
-        env:
-          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
-        run: ./.github/scripts/package-plocate.sh "${RELEASE_VERSION}"
-
-      - name: Stage release assets
+      - name: Inspect Linux archives
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp target/release/packager/*.deb dist/
-          cp target/release/packager/*_x86_64.tar.gz dist/
+          for archive in dist/cefdetector-*-linux-x86_64-*.tar.gz; do
+            tar -tzf "${archive}" >/dev/null
+          done
           ls -lh dist
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: release-linux
-          path: dist/*
+          name: release-linux-x86_64
+          path: dist/cefdetector-*-linux-x86_64-*.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -239,7 +241,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: release-windows-${{ matrix.backend }}
+          name: release-windows-x86_64-${{ matrix.backend }}
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7

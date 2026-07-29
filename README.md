@@ -19,29 +19,20 @@ Check how many CEFs are on your computer
 
 ![Screenshot](./screenshot.webp)
 
-## 安装
+## 下载
 
-### Windows
+[Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases)
+页面提供以下构建产物：
 
-从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载 Windows 压缩包。ignore 后缀的版本直接遍历所有逻辑盘；everything 后缀的版本使用 Everything 索引，需要预先安装并运行 [Everything](https://www.voidtools.com/)，同时启用 IPC。
+| 平台 | 搜索后端 | 文件名 |
+| --- | --- | --- |
+| Linux x86_64 | ignore（默认并行目录遍历） | `cefdetector-<version>-linux-x86_64-ignore.tar.gz` |
+| Linux x86_64 | plocate 索引 | `cefdetector-<version>-linux-x86_64-plocate.tar.gz` |
+| Windows x86_64 | ignore（遍历所有逻辑盘） | `cefdetector-<version>-windows-x86_64-ignore.zip` |
+| Windows x86_64 | Everything IPC | `cefdetector-<version>-windows-x86_64-everything.zip` |
 
-### Debian
-
-从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载最新的 `.deb` 包安装
-
-### Arch Linux
-
-使用默认的并行目录遍历后端：
-
-```bash
-yay/paru -S cefdetector-bin
-```
-
-使用基于系统文件索引的 plocate 后端：
-
-```bash
-yay/paru -S cefdetector-plocate-bin
-```
+Everything 后端需要预先安装并运行
+[Everything](https://www.voidtools.com/)，同时启用 IPC。
 
 > [!NOTE]
 > plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测；它也不保证一定比默认后端更快。

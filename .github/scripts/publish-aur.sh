@@ -4,7 +4,7 @@ set -euo pipefail
 
 AUR_TAG=${1:-}
 AUR_GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-Tobiichi-Origuchi/CefDetectorLinux}
-AUR_ASSET_DIR=${RELEASE_ASSET_DIR:-target/release/packager}
+AUR_ASSET_DIR=${RELEASE_ASSET_DIR:-dist}
 AUR_HOST="aur.archlinux.org"
 AUR_EXPECTED_HOST_FINGERPRINT="SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
 AUR_RENDER_DIR=""
@@ -27,8 +27,8 @@ elif (($# != 1)); then
 fi
 
 AUR_VERSION=${AUR_TAG#v}
-AUR_DEFAULT_PACKAGE_FILE="cefdetector_${AUR_VERSION}_x86_64.tar.gz"
-AUR_PLOCATE_PACKAGE_FILE="cefdetector-plocate_${AUR_VERSION}_x86_64.tar.gz"
+AUR_DEFAULT_PACKAGE_FILE="cefdetector-${AUR_VERSION}-linux-x86_64-ignore.tar.gz"
+AUR_PLOCATE_PACKAGE_FILE="cefdetector-${AUR_VERSION}-linux-x86_64-plocate.tar.gz"
 
 for package_file in "${AUR_DEFAULT_PACKAGE_FILE}" "${AUR_PLOCATE_PACKAGE_FILE}"; do
     if [[ ! -f "${AUR_ASSET_DIR}/${package_file}" ]]; then

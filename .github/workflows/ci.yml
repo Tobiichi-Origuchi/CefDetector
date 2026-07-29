@@ -19,9 +19,17 @@ env:
 
 jobs:
   linux:
-    name: Linux
+    name: Linux (${{ matrix.backend }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: ignore
+            cargo_args: ""
+          - backend: plocate
+            cargo_args: --no-default-features --features plocate
 
     steps:
       - name: Check out repository
@@ -42,6 +50,7 @@ jobs:
             libgl1-mesa-dri \
             libglx-mesa0 \
             libxkbcommon-x11-0 \
+            plocate \
             pkg-config \
             xauth \
             xvfb
@@ -49,24 +58,21 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
+          key: ${{ matrix.backend }}
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Check formatting
+        if: matrix.backend == 'ignore'
         run: cargo fmt --all -- --check
 
       - name: Run tests
-        run: cargo test --locked --all-targets
+        run: cargo test --locked ${{ matrix.cargo_args }} --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Validate plocate backend interface
-        run: |
-          cargo test --locked --no-default-features --features plocate --all-targets
-          cargo clippy --locked --no-default-features --features plocate --all-targets -- -D warnings
+        run: cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
 
       - name: Build release binary
-        run: cargo build --locked --release
+        run: cargo build --locked --release ${{ matrix.cargo_args }}
 
       - name: Test GUI startup
         timeout-minutes: 2
@@ -139,7 +145,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -LiteralPath target/release/cefdetector.exe `
-            -Destination "dist/cefdetector-${{ matrix.backend }}.exe"
+            -Destination "dist/cefdetector-windows-x86_64-${{ matrix.backend }}.exe"
 
       - name: Upload executable
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

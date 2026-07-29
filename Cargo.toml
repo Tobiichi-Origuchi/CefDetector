@@ -36,28 +36,6 @@ glutin = { version = "0.32.3", default-features = false, features = ["wgl"] }
 glutin-winit = { version = "0.5.0", default-features = false, features = ["wgl"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
-[package.metadata.packager]
-identifier = "cefdetector"
-category = "Utility"
-description = "Find CEF-based applications and their disk usage."
-homepage = "https://github.com/Tobiichi-Origuchi/CefDetectorLinux"
-publisher = "Origuchi"
-icons = ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
-formats = ["deb", "pacman"]
-out-dir = "target/release/packager"
-before-packaging-command = "cargo build --locked --release"
-
-[package.metadata.packager.deb]
-depends = ["fontconfig", "libegl1 | libglx0", "xdg-utils"]
-package-name = "cefdetector"
-section = "utils"
-files = { "completions/cefdetector.bash" = "/usr/share/bash-completion/completions/cefdetector", "completions/cefdetector.zsh" = "/usr/share/zsh/vendor-completions/_cefdetector", "completions/cefdetector.fish" = "/usr/share/fish/vendor_completions.d/cefdetector.fish" }
-
-[package.metadata.packager.pacman]
-depends = ["fontconfig", "libglvnd", "xdg-utils"]
-provides = ["cefdetector"]
-files = { "completions/cefdetector.bash" = "/usr/share/bash-completion/completions/cefdetector", "completions/cefdetector.zsh" = "/usr/share/zsh/vendor-completions/_cefdetector", "completions/cefdetector.fish" = "/usr/share/fish/vendor_completions.d/cefdetector.fish" }
-
 [profile.release]
 opt-level = "z"
 lto = true

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CEF Detector
+Comment=Find CEF-based applications and their disk usage
+Exec=cefdetector
+Icon=cefdetector
+Terminal=false
+Categories=Utility;

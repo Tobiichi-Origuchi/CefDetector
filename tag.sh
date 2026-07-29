@@ -32,8 +32,8 @@ Options:
   -h, --help          Show this help
 
 The script requires a clean working tree, updates Cargo.toml and Cargo.lock,
-runs the same Rust checks as CI plus a release build, creates an annotated
-release tag, and atomically pushes the current branch and tag.
+checks both Linux search backends, creates an annotated release tag, and
+atomically pushes the current branch and tag.
 EOF
 }
 
@@ -147,7 +147,7 @@ if [[ "${DRY_RUN}" == true ]]; then
   else
     printf '  Push:    branch and tag to %s atomically\n' "${REMOTE}"
   fi
-  printf '  Checks:  format, tests, Clippy, and release build\n'
+  printf '  Checks:  format, tests, Clippy, and release builds for ignore and plocate\n'
   exit 0
 fi
 
@@ -208,7 +208,10 @@ printf 'Running release checks...\n'
 cargo fmt --all -- --check
 cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --no-default-features --features plocate --all-targets
+cargo clippy --locked --no-default-features --features plocate --all-targets -- -D warnings
 cargo build --locked --release
+cargo build --locked --release --no-default-features --features plocate
 git diff --check
 
 if [[ "${CURRENT_VERSION}" != "${RAW_VERSION}" ]]; then
