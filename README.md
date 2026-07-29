@@ -5,7 +5,6 @@ Check how many CEFs are on your computer
 **[使用 Rust 编写，支持 Linux 和 Windows]**
 
 > [!Note]
-> 聪明的你，一定注意到了项目名叫 CefDetector**Linux**，那为什么会支持 Windows？只是我懒得改仓库名了XD  
 > 目前 Windows 支持是实验性的
 
 看看你的电脑上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
@@ -26,7 +25,7 @@ Check how many CEFs are on your computer
 
 | 平台 | 搜索后端 | 文件名 |
 | --- | --- | --- |
-| Linux x86_64 | ignore（默认并行目录遍历） | `cefdetector-<version>-linux-x86_64-ignore.tar.gz` |
+| Linux x86_64 | ignore（并行目录遍历） | `cefdetector-<version>-linux-x86_64-ignore.tar.gz` |
 | Linux x86_64 | plocate 索引 | `cefdetector-<version>-linux-x86_64-plocate.tar.gz` |
 | Windows x86_64 | ignore（遍历所有逻辑盘） | `cefdetector-<version>-windows-x86_64-ignore.zip` |
 | Windows x86_64 | Everything IPC | `cefdetector-<version>-windows-x86_64-everything.zip` |
@@ -59,7 +58,7 @@ cefdetector --json
 
 通过创建一个配置文件来忽略特定目录
 
-Linux 配置文件位于 `~/.config/cefdetector/.ignore`（或 `$XDG_CONFIG_HOME/cefdetector/.ignore`），Windows 配置文件位于 `%APPDATA%\cefdetector\.ignore`：
+Linux 配置文件位于 `$XDG_CONFIG_HOME/cefdetector/.ignore`，Windows 配置文件位于 `%APPDATA%\cefdetector\.ignore`：
 
 ```gitignore
 # 忽略目录名称（跳过所有名为 target 和 node_modules 的目录）
@@ -78,15 +77,12 @@ D:\Games\build
 - 检测 CEF 的类型: 如 [libcef](https://github.com/chromiumembedded/cef)、[Electron](https://www.electronjs.org/)、[NWJS](https://nwjs.io/)、[CefSharp](http://cefsharp.github.io/)、[MiniBlink](https://github.com/weolar/miniblink49)、[MiniElectron](https://github.com/weolar/miniblink49)、[Edge](https://www.microsoft.com/en-us/edge) 和 [Chrome](https://www.google.com/chrome/)
 - 检测应用图标: 通过解析 PE、AppImage、同级目录、快捷方式、Linux 包管理器（APT/Pacman/RPM/Portage/Flatpak/Snap/Nix/Brew）
 - 显示总空间占用
-- 显示当前所运行的进程 (绿色文件名)
+- 显示当前所运行的进程
 - 单独显示每个程序的空间占用并按大小排序
 
 ## Benchmark
 
 ### Linux
-
-Linux 脚本会分别构建并测试 ignore 与 plocate 两种搜索后端。测试 plocate
-后端前，需要安装 `plocate` 并准备好可用的索引数据库。
 
 一次运行 CLI 搜索、GUI 首帧启动和固定时长 GUI 采样，并将原始数据写入 CSV：
 
@@ -106,13 +102,9 @@ Linux 脚本会分别构建并测试 ignore 与 plocate 两种搜索后端。测
 ./benchmark.sh gui --duration 10 --no-build --output gui-linux.csv
 ```
 
-CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、单核与整机 CPU
-占比、峰值常驻/私有内存、文件描述符数、线程数、退出状态和 CLI 结果数。
+CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、单核与整机 CPU 占比、峰值常驻/私有内存、文件描述符数、线程数、退出状态和 CLI 结果数
 
 ### Windows
-
-Windows 脚本会分别构建并测试 ignore 与 Everything IPC 两种搜索后端。测试
-Everything 后端前，需要启动 Everything 桌面客户端并启用 IPC。
 
 一次运行 CLI 搜索、GUI 首帧启动和固定时长 GUI 采样，并将原始数据写入 CSV：
 
@@ -132,8 +124,7 @@ pwsh -NoProfile -File .\benchmark.ps1 -Mode scan -WarmupRuns 2 -ScanRuns 10
 pwsh -NoProfile -File .\benchmark.ps1 -Mode gui -GuiDurationSeconds 10 -NoBuild
 ```
 
-CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、整机 CPU 占比、
-峰值工作集、峰值私有内存、句柄数、线程数、退出状态和 CLI 结果数。
+CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、整机 CPU 占比、峰值工作集、峰值私有内存、句柄数、线程数、退出状态和 CLI 结果数
 
 ## 作者
 
