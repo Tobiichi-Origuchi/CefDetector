@@ -5,7 +5,7 @@ Check how many CEFs are on your computer
 **[使用 Rust 编写，支持 Linux 和 Windows]**
 
 > [!Note]
-> 聪明的你，一定注意到了项目名叫 CefDetector**Linux**，那为什么会支持 Windows？只是我懒得改仓库名了XD
+> 聪明的你，一定注意到了项目名叫 CefDetector**Linux**，那为什么会支持 Windows？只是我懒得改仓库名了XD  
 > 目前 Windows 支持是实验性的
 
 看看你的电脑上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
