@@ -1,8 +1,12 @@
-# CEF Detector - 一眼 CEF [![CI](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
+# CEF Detector [![CI](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
 
 Check how many CEFs are on your computer
 
 **[使用 Rust 编写，支持 Linux 和 Windows]**
+
+> [!Note]
+> 聪明的你，一定注意到了项目名叫 CefDetector**Linux**，那为什么会支持 Windows？只是我懒得改仓库名了XD
+> 目前 Windows 支持是实验性的
 
 看看你的电脑上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
 
@@ -19,7 +23,7 @@ Check how many CEFs are on your computer
 
 ### Windows
 
-从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载 Windows 压缩包。默认版本直接遍历所有逻辑盘；Everything 版本使用本机索引，需要预先安装并运行 [Everything](https://www.voidtools.com/)，同时启用 IPC。图形界面要求显卡驱动提供 OpenGL 2.0 或更高版本；Windows 自带的 OpenGL 1.1 软件回退不满足要求，请安装显卡厂商提供的驱动。
+从 [Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases) 页面下载 Windows 压缩包。ignore 后缀的版本直接遍历所有逻辑盘；everything 后缀的版本使用 Everything 索引，需要预先安装并运行 [Everything](https://www.voidtools.com/)，同时启用 IPC。
 
 ### Debian
 
@@ -87,10 +91,6 @@ D:\Games\build
 - 单独显示每个程序的空间占用并按大小排序
 
 ## Benchmark
-
-`benchmark.sh` 不依赖 `psrecord`、`hyperfine` 或 GNU `time`。它会先构建锁定依赖的 release
-版本，预热文件系统缓存，再通过 Linux `/proc` 采样主进程及其子进程的峰值 RSS，原始结果保存为
-CSV。
 
 测试完整的 CLI 搜索（默认预热 1 次、正式运行 5 次）：
 
