@@ -94,23 +94,29 @@ D:\Games\build
 
 ### Linux
 
-测试完整的 CLI 搜索（默认预热 1 次、正式运行 5 次）：
+Linux 脚本会分别构建并测试 ignore 与 plocate 两种搜索后端。测试 plocate
+后端前，需要安装 `plocate` 并准备好可用的索引数据库。
+
+一次运行 CLI 搜索、GUI 首帧启动和固定时长 GUI 采样，并将原始数据写入 CSV：
 
 ```bash
-./benchmark.sh scan
+./benchmark.sh
 ```
 
-测试 GUI 在指定时间内的内存占用：
+只测试两种 CLI 后端并调整预热和正式运行次数：
 
 ```bash
-./benchmark.sh gui --duration 10 --output gui-benchmark.csv
+./benchmark.sh scan --scan-warmup-runs 2 --scan-runs 10
 ```
 
-复用已经构建的二进制并调整运行次数：
+只测试 GUI，并复用脚本先前保存的两个后端二进制：
 
 ```bash
-./benchmark.sh scan --no-build --warmup 2 --runs 10
+./benchmark.sh gui --duration 10 --no-build --output gui-linux.csv
 ```
+
+CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、单核与整机 CPU
+占比、峰值常驻/私有内存、文件描述符数、线程数、退出状态和 CLI 结果数。
 
 ### Windows
 
