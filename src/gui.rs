@@ -22,7 +22,7 @@ use crate::search::core_search;
 const WINDOW_TITLE: &str = "CEF Detector";
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "cefdetector";
-const REPOSITORY_URL: &str = "https://github.com/Tobiichi-Origuchi/CefDetectorLinux";
+const REPOSITORY_URL: &str = "https://github.com/Tobiichi-Origuchi/CefDetector";
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
@@ -32,7 +32,7 @@ const CELL_WIDTH: f32 = 106.0;
 const CELL_HEIGHT: f32 = 128.0;
 
 const SEARCHING_TEXT: &str = "正在全盘搜索 CEF 应用，请耐心等待...";
-const REPOSITORY_TEXT: &str = "Repo: github.com/Tobiichi-Origuchi/CefDetectorLinux (求个STAR!)";
+const REPOSITORY_TEXT: &str = "Repo: github.com/Tobiichi-Origuchi/CefDetector (求个STAR!)";
 
 #[derive(Debug)]
 struct GuiError(String);

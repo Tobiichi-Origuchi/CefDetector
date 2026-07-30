@@ -1,4 +1,4 @@
-# CEF Detector [![CI](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/actions/workflows/release.yml)
+# CEF Detector [![CI](https://github.com/Tobiichi-Origuchi/CefDetector/actions/workflows/ci.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetector/actions/workflows/ci.yml) [![Release](https://github.com/Tobiichi-Origuchi/CefDetector/actions/workflows/release.yml/badge.svg)](https://github.com/Tobiichi-Origuchi/CefDetector/actions/workflows/release.yml)
 
 Check how many CEFs are on your computer
 
@@ -10,7 +10,7 @@ Check how many CEFs are on your computer
 看看你的电脑上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
 
 > [!Note]
-> 欢迎你把程序截图发到 [Discussions](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/discussions) 中, 看看谁才是真的 **《超级CEF王》**
+> 欢迎你把程序截图发到 [Discussions](https://github.com/Tobiichi-Origuchi/CefDetector/discussions) 中, 看看谁才是真的 **《超级CEF王》**
 
 > 你说的对，但是《LibCEF》是由谷歌自主研发的一款全新开放浏览器内核。第三方代码运行在在一个被称作「CEF」的浏览器沙盒，在这里，被前端程序员选中的代码将被授予「libcef.so」，导引浏览器之力‌。你将扮演一位名为「电脑用户」的冤种角色，在各种软件的安装中下载类型各异、体积庞大的 CEF 们，被它们一起占用硬盘空间，吃光你的内存——同时，逐步发掘「CEF」的真相
 
@@ -20,7 +20,7 @@ Check how many CEFs are on your computer
 
 ## 下载
 
-[Release](https://github.com/Tobiichi-Origuchi/CefDetectorLinux/releases)
+[Release](https://github.com/Tobiichi-Origuchi/CefDetector/releases)
 页面提供以下构建产物：
 
 | 平台 | 搜索后端 | 文件名 |

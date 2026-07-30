@@ -4,7 +4,7 @@ version = "0.4.1"
 description = "Find CEF-based applications and their disk usage."
 authors = ["Origuchi"]
 license = "MIT"
-repository = "https://github.com/Tobiichi-Origuchi/CefDetectorLinux"
+repository = "https://github.com/Tobiichi-Origuchi/CefDetector"
 edition = "2024"
 rust-version = "1.92.0"
 
