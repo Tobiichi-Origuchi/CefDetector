@@ -2,11 +2,6 @@
 
 Check how many CEFs are on your computer
 
-**[使用 Rust 编写，支持 Linux 和 Windows]**
-
-> [!Note]
-> 目前 Windows 支持是实验性的
-
 看看你的电脑上有多少个 [CEF (Chromium Embedded Framework)](https://github.com/chromiumembedded/cef)
 
 > [!Note]
@@ -25,19 +20,31 @@ Check how many CEFs are on your computer
 
 | 平台 | 搜索后端 | 文件名 |
 | --- | --- | --- |
-| Linux x86_64 | ignore（并行目录遍历） | `cefdetector-<version>-linux-x86_64-ignore.tar.gz` |
-| Linux x86_64 | plocate 索引 | `cefdetector-<version>-linux-x86_64-plocate.tar.gz` |
-| Windows x86_64 | ignore（遍历所有逻辑盘） | `cefdetector-<version>-windows-x86_64-ignore.zip` |
+| Linux x86_64 | ignore | `cefdetector-<version>-linux-x86_64-ignore.tar.gz` |
+| Linux x86_64 | plocate | `cefdetector-<version>-linux-x86_64-plocate.tar.gz` |
+| Windows x86_64 | ignore | `cefdetector-<version>-windows-x86_64-ignore.zip` |
 | Windows x86_64 | Everything IPC | `cefdetector-<version>-windows-x86_64-everything.zip` |
 
-Everything 后端需要预先安装并运行[Everything](https://www.voidtools.com/)，同时启用 IPC（精简版没有 IPC，所以不支持）。
+(macOS to be continued...)
 
-plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测；它似乎不一定比默认后端更快。
+ignore 后端就是用 rust 的 ignore 库多线程枚举所有路径，速度相对慢，内存占用更高，更吃 CPU 的性能，唯一的好处是不用额外的依赖
+
+Everything 后端需要预先安装并运行[Everything](https://www.voidtools.com/)，同时启用 IPC（精简版没有 IPC，所以不支持）
+
+plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测，而且它似乎不一定比 ignore 更快
 
 > [!NOTE]
 > A bind mount is an alternate view of a directory tree. Classically, mounting creates a view of a storage device as a directory tree. A bind mount instead takes an existing directory tree and replicates it under a different point. The directories and files in the bind mount are the same as the original. Any modification on one side is immediately reflected on the other side, since the two views show the same data.
 >
-> 事实上 Btrfs 的一些目录就是 bind mount 的，比如 @home，所以如果你使用 Btrfs 文件系统，大概率用 plocate 后端是检测不到你的家目录里的 CEF 的
+> 事实上 Btrfs 的一些目录就是 bind mount 的，比如 @home，所以如果你使用 Btrfs，大概率用 plocate 后端是检测不到你的家目录里的 CEF 的
+>
+> [这里](https://unix.stackexchange.com/questions/743060/plocate-couldnt-find-results-in-my-home-dir-but-mlocate-could-how-to-searc)有详细的讨论
+>
+> 解决办法在讨论中也写了：
+> 1. edit `/etc/updatedb.conf`
+> 2. replace `PRUNE_BIND_MOUNTS = "yes"` with `PRUNE_BIND_MOUNTS = "no"`
+> 3. save the file
+> 4. update the db with `sudo updatedb`
 
 ## 使用
 
@@ -49,13 +56,20 @@ cefdetector
 
 ### Cli
 
-例如以 JSON 格式打印
-
 ```bash
-cefdetector --json
-```
+$ cefdetector --help
+CEF Detector ${VERSION}
 
-使用 `cefdetector --help` 查看更多用法
+Usage: cefdetector [OPTIONS]
+
+Options:
+  -h, --help       Print help information
+  -V, --version    Print version information
+  -T, --toml       Output results in TOML format
+  -J, --json       Output results in JSON format
+  -C, --csv        Output results in CSV format
+  -O, --output     Output results to the specified file path instead of stdout
+```
 
 ### 忽略目录
 
@@ -87,47 +101,25 @@ D:\Games\build
 
 ### Linux
 
-一次运行 CLI 搜索、GUI 首帧启动和固定时长 GUI 采样，并将原始数据写入 CSV：
+这是在我的系统上实测的，共 15 个结果，6.45 GB
 
-```bash
-./benchmark.sh
+```plain
+Summary:
+  ignore, scan: elapsed 619.6 ms mean (615-625); peak RSS 61.39 MiB mean (57.07-67.82)
+  ignore, gui-startup: elapsed 214.0 ms mean (214-214); peak RSS 204.77 MiB mean (204.77-204.77)
+  ignore, gui: elapsed 5022.0 ms mean (5022-5022); peak RSS 251.29 MiB mean (251.29-251.29)
+  plocate, scan: elapsed 591.6 ms mean (585-599); peak RSS 28.23 MiB mean (28.15-28.29)
+  plocate, gui-startup: elapsed 174.0 ms mean (174-174); peak RSS 197.28 MiB mean (197.28-197.28)
+  plocate, gui: elapsed 5005.0 ms mean (5005-5005); peak RSS 197.11 MiB mean (197.11-197.11)
 ```
-
-只测试两种 CLI 后端并调整预热和正式运行次数：
-
-```bash
-./benchmark.sh scan --scan-warmup-runs 2 --scan-runs 10
-```
-
-只测试 GUI，并复用脚本先前保存的两个后端二进制：
-
-```bash
-./benchmark.sh gui --duration 10 --no-build --output gui-linux.csv
-```
-
-CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、单核与整机 CPU 占比、峰值常驻/私有内存、文件描述符数、线程数、退出状态和 CLI 结果数
 
 ### Windows
 
-一次运行 CLI 搜索、GUI 首帧启动和固定时长 GUI 采样，并将原始数据写入 CSV：
+由于只有虚拟机，而且虚拟机中的 CEF 软件数量太少，测试结果没有代表性，如果有好心人愿意测试，可以：
 
-```powershell
-pwsh -NoProfile -File .\benchmark.ps1
-```
-
-只测试两种 CLI 后端并调整预热和正式运行次数：
-
-```powershell
-pwsh -NoProfile -File .\benchmark.ps1 -Mode scan -WarmupRuns 2 -ScanRuns 10
-```
-
-只测试 GUI，并复用已经构建的两个二进制：
-
-```powershell
-pwsh -NoProfile -File .\benchmark.ps1 -Mode gui -GuiDurationSeconds 10 -NoBuild
-```
-
-CSV 包含采样耗时、完整进程生命周期、用户态/内核态 CPU、整机 CPU 占比、峰值工作集、峰值私有内存、句柄数、线程数、退出状态和 CLI 结果数
+1. 安装 rust toolchain 1.92-x86_64-pc-windows-msvc
+2. 运行 `pwsh -NoProfile -File .\benchmark.ps1`
+3. 将结果发在 issue
 
 ## 作者
 
