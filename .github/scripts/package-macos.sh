@@ -14,7 +14,6 @@ fi
 project_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 output_dir="${PACKAGE_OUTPUT_DIR:-${project_dir}/dist}"
 binary_dir="${project_dir}/target/release/package-binaries-macos"
-identity="${MACOS_CODESIGN_IDENTITY:--}"
 mkdir -p "${output_dir}" "${binary_dir}"
 
 for backend in ignore spotlight; do
@@ -44,8 +43,9 @@ for backend in ignore spotlight; do
   cp "${binary}" "${bundle}/Contents/MacOS/cefdetector"
   cp "${project_dir}/icons/icon.icns" "${bundle}/Contents/Resources/icon.icns"
   chmod 755 "${bundle}/Contents/MacOS/cefdetector"
-  codesign --force --deep --options runtime --sign "${identity}" "${bundle}"
+  codesign --force --deep --sign - "${bundle}"
   codesign --verify --deep --strict --verbose=2 "${bundle}"
+  codesign --display --verbose=4 "${bundle}" 2>&1 | grep -q '^Signature=adhoc$'
   archive="${output_dir}/cefdetector-${version}-macos-aarch64-${backend}.zip"
   rm -f "${archive}"
   ditto -c -k --sequesterRsrc --keepParent "${bundle}" "${archive}"
