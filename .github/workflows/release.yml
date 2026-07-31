@@ -246,12 +246,133 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  macos:
+    name: macOS Apple Silicon packages
+    needs: metadata
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+        with:
+          components: clippy
+
+      - name: Verify Apple Silicon host
+        run: |
+          test "$(uname -m)" = "arm64"
+          rustc -vV
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: release-macos
+
+      - name: Validate both macOS backends
+        run: |
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --no-default-features --features spotlight --all-targets
+          cargo clippy --locked --no-default-features --features spotlight --all-targets -- -D warnings
+
+      - name: Import Developer ID certificate
+        id: signing
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CERTIFICATE_P12}" ]]; then
+            echo 'identity=-' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          keychain="${RUNNER_TEMP}/cefdetector-signing.keychain-db"
+          security create-keychain -p '' "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p '' "${keychain}"
+          printf '%s' "${CERTIFICATE_P12}" | base64 --decode > "${RUNNER_TEMP}/certificate.p12"
+          security import "${RUNNER_TEMP}/certificate.p12" -k "${keychain}" \
+            -P "${CERTIFICATE_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "${keychain}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k '' "${keychain}"
+          identity="$(security find-identity -v -p codesigning "${keychain}" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)"
+          test -n "${identity}"
+          echo "identity=${identity}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require release signing and notarization credentials
+        if: needs.metadata.outputs.prerelease == 'false'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: |
+          test "${SIGNING_IDENTITY}" != '-'
+          test -n "${APPLE_ID}"
+          test -n "${APPLE_TEAM_ID}"
+          test -n "${APPLE_APP_PASSWORD}"
+
+      - name: Build signed app bundles
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          PACKAGE_OUTPUT_DIR: dist
+        run: ./.github/scripts/package-macos.sh "${{ needs.metadata.outputs.version }}"
+
+      - name: Test packaged applications
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          for archive in dist/cefdetector-*-macos-aarch64-*.zip; do
+            unpacked="${RUNNER_TEMP}/smoke-$(basename "${archive}" .zip)"
+            ditto -x -k "${archive}" "${unpacked}"
+            CEFDETECTOR_GUI_SMOKE_TEST=1 "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector"
+            codesign --verify --deep --strict --verbose=2 "${unpacked}/CefDetector.app"
+            file "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector" | grep -q arm64
+            ! lipo -info "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector" | grep -q x86_64
+          done
+
+      - name: Notarize and staple stable packages
+        if: needs.metadata.outputs.prerelease == 'false'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for archive in dist/cefdetector-*-macos-aarch64-*.zip; do
+            xcrun notarytool submit "${archive}" --wait \
+              --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" --password "${APPLE_APP_PASSWORD}"
+            unpacked="${RUNNER_TEMP}/notarized-$(basename "${archive}" .zip)"
+            ditto -x -k "${archive}" "${unpacked}"
+            xcrun stapler staple "${unpacked}/CefDetector.app"
+            codesign --verify --deep --strict --verbose=2 "${unpacked}/CefDetector.app"
+            spctl --assess --type execute --verbose=2 "${unpacked}/CefDetector.app"
+            rm "${archive}"
+            ditto -c -k --sequesterRsrc --keepParent "${unpacked}/CefDetector.app" "${archive}"
+          done
+
+      - name: Upload macOS packages
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-macos-aarch64
+          path: dist/cefdetector-*-macos-aarch64-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish release
     needs:
       - metadata
       - linux
       - windows
+      - macos
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

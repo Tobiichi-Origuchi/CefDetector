@@ -154,3 +154,64 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
           retention-days: 7
+
+  macos:
+    name: macOS 15 arm64 (${{ matrix.backend }})
+    runs-on: macos-15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: ignore
+            cargo_args: ""
+          - backend: spotlight
+            cargo_args: --no-default-features --features spotlight
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.92.0
+        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+        with:
+          components: clippy
+
+      - name: Verify Apple Silicon host
+        run: |
+          test "$(uname -m)" = "arm64"
+          rustc -vV
+          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: macos-15-${{ matrix.backend }}
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Run tests
+        run: cargo test --locked ${{ matrix.cargo_args }} --all-targets
+
+      - name: Run Clippy
+        run: cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --locked --release ${{ matrix.cargo_args }}
+
+      - name: Test CLI and Spotlight command
+        run: |
+          target/release/cefdetector --version
+          target/release/cefdetector --help
+          if [[ "${{ matrix.backend }}" == "spotlight" ]]; then
+            /usr/bin/mdfind -0 'kMDItemContentTypeTree == "com.apple.application-bundle"' >/dev/null
+            target/release/cefdetector --json >/tmp/cefdetector-spotlight.json
+            plutil -lint /tmp/cefdetector-spotlight.json
+          fi
+
+      - name: Test GUI startup
+        timeout-minutes: 2
+        env:
+          CEFDETECTOR_GUI_SMOKE_TEST: "1"
+        run: target/release/cefdetector
