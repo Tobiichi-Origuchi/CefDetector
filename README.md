@@ -30,11 +30,14 @@ Check how many CEFs are on your computer
 | Windows x86_64 | ignore（遍历所有逻辑盘） | `cefdetector-<version>-windows-x86_64-ignore.zip` |
 | Windows x86_64 | Everything IPC | `cefdetector-<version>-windows-x86_64-everything.zip` |
 
-Everything 后端需要预先安装并运行
-[Everything](https://www.voidtools.com/)，同时启用 IPC。
+Everything 后端需要预先安装并运行[Everything](https://www.voidtools.com/)，同时启用 IPC（精简版没有 IPC，所以不支持）。
+
+plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测；它似乎不一定比默认后端更快。
 
 > [!NOTE]
-> plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测；它也不保证一定比默认后端更快。
+> A bind mount is an alternate view of a directory tree. Classically, mounting creates a view of a storage device as a directory tree. A bind mount instead takes an existing directory tree and replicates it under a different point. The directories and files in the bind mount are the same as the original. Any modification on one side is immediately reflected on the other side, since the two views show the same data.
+>
+> 事实上 Btrfs 的一些目录就是 bind mount 的，比如 @home，所以如果你使用 Btrfs 文件系统，大概率用 plocate 后端是检测不到你的家目录里的 CEF 的
 
 ## 使用
 
