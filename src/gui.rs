@@ -680,10 +680,12 @@ fn layout_elided(
     painter.layout_job(job)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct SystemFont {
     path: PathBuf,
     index: u32,
+    weight: Option<f32>,
+    optical_size: Option<f32>,
 }
 
 #[cfg(target_os = "linux")]
@@ -700,7 +702,12 @@ fn match_system_font(pattern: &str) -> Option<SystemFont> {
     let mut lines = output.lines();
     let path = PathBuf::from(lines.next()?);
     let index = lines.next()?.parse().ok()?;
-    path.is_file().then_some(SystemFont { path, index })
+    path.is_file().then_some(SystemFont {
+        path,
+        index,
+        weight: None,
+        optical_size: None,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -735,7 +742,12 @@ fn fonts_from_windows_directory(file_names: &[&str]) -> Vec<SystemFont> {
         .iter()
         .map(|file_name| fonts_dir.join(file_name))
         .filter(|path| path.is_file())
-        .map(|path| SystemFont { path, index: 0 })
+        .map(|path| SystemFont {
+            path,
+            index: 0,
+            weight: None,
+            optical_size: None,
+        })
         .collect()
 }
 
@@ -762,34 +774,96 @@ fn bold_system_fonts() -> Vec<SystemFont> {
 }
 
 #[cfg(target_os = "macos")]
-fn fonts_from_macos_paths(paths: &[&str]) -> Vec<SystemFont> {
-    paths
-        .iter()
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-        .map(|path| SystemFont { path, index: 0 })
-        .collect()
+fn macos_font(path: &str, index: u32) -> Option<SystemFont> {
+    let path = PathBuf::from(path);
+    path.is_file().then_some(SystemFont {
+        path,
+        index,
+        weight: None,
+        optical_size: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_font_by_postscript_name(
+    path: &str,
+    postscript_name: &str,
+    weight: Option<f32>,
+    optical_size: Option<f32>,
+) -> Option<SystemFont> {
+    use skrifa::raw::TableProvider as _;
+    use skrifa::raw::types::NameId;
+
+    let path = PathBuf::from(path);
+    let file = std::fs::File::open(&path).ok()?;
+    // SAFETY: The mapping is read-only and remains alive for the duration of
+    // all font-table references created below.
+    let mapping = unsafe { memmap2::MmapOptions::new().map(&file).ok()? };
+    let fonts = skrifa::raw::FileRef::new(&mapping).ok()?;
+
+    fonts.fonts().enumerate().find_map(|(index, font)| {
+        let name = font.ok()?.name().ok()?;
+        let string_data = name.string_data();
+        let matches = name
+            .name_record()
+            .iter()
+            .filter(|record| record.name_id() == NameId::POSTSCRIPT_NAME)
+            .filter_map(|record| record.string(string_data).ok())
+            .any(|name| name.chars().eq(postscript_name.chars()));
+        matches.then(|| SystemFont {
+            path: path.clone(),
+            index: index as u32,
+            weight,
+            optical_size,
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn push_unique_font(fonts: &mut Vec<SystemFont>, font: Option<SystemFont>) {
+    if let Some(font) = font
+        && !fonts.contains(&font)
+    {
+        fonts.push(font);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_fonts(
+    sfns_weight: f32,
+    hiragino_name: &str,
+    hiragino_index: u32,
+    helvetica_index: u32,
+) -> Vec<SystemFont> {
+    const SFNS: &str = "/System/Library/Fonts/SFNS.ttf";
+    const HIRAGINO: &str = "/System/Library/Fonts/Hiragino Sans GB.ttc";
+    const HELVETICA: &str = "/System/Library/Fonts/Helvetica.ttc";
+    const HELVETICA_NEUE: &str = "/System/Library/Fonts/HelveticaNeue.ttc";
+    const ARIAL_UNICODE: &str = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
+
+    let hiragino = macos_font_by_postscript_name(HIRAGINO, hiragino_name, None, None)
+        .or_else(|| macos_font(HIRAGINO, hiragino_index));
+    let sfns = macos_font_by_postscript_name(SFNS, ".SFNS-Regular", Some(sfns_weight), Some(17.0));
+    let mut fonts = Vec::new();
+
+    // egui cannot rasterize the private variable PingFang UI faces reliably.
+    // Hiragino covers both Latin and CJK, keeping mixed text on one baseline.
+    push_unique_font(&mut fonts, hiragino);
+    push_unique_font(&mut fonts, sfns);
+    push_unique_font(&mut fonts, macos_font(HELVETICA, helvetica_index));
+    push_unique_font(&mut fonts, macos_font(HELVETICA_NEUE, helvetica_index));
+    push_unique_font(&mut fonts, macos_font(ARIAL_UNICODE, 0));
+    fonts
 }
 
 #[cfg(target_os = "macos")]
 fn regular_system_fonts() -> Vec<SystemFont> {
-    fonts_from_macos_paths(&[
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    ])
+    macos_system_fonts(400.0, "HiraginoSansGB-W3", 0, 0)
 }
 
 #[cfg(target_os = "macos")]
 fn bold_system_fonts() -> Vec<SystemFont> {
-    fonts_from_macos_paths(&[
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    ])
+    macos_system_fonts(700.0, "HiraginoSansGB-W6", 2, 1)
 }
 
 fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiError> {
@@ -866,6 +940,12 @@ fn add_system_fonts(
 
         let mut data = FontData::from_static(bytes);
         data.index = font.index;
+        if let Some(weight) = font.weight {
+            data.tweak.coords.push("wght", weight);
+        }
+        if let Some(optical_size) = font.optical_size {
+            data.tweak.coords.push("opsz", optical_size);
+        }
         definitions.font_data.insert(name.clone(), Arc::new(data));
         names.push(name);
     }
@@ -1380,6 +1460,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::{bold_system_fonts, regular_system_fonts};
     use super::{format_size, scroll_from_thumb_drag};
 
     #[test]
@@ -1393,5 +1475,20 @@ mod tests {
     fn scrollbar_drag_uses_total_pointer_displacement() {
         assert_eq!(scroll_from_thumb_drag(20.0, 30.0, 200.0, 100.0), 80.0);
         assert_eq!(scroll_from_thumb_drag(20.0, -30.0, 200.0, 100.0), 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_primary_font_has_distinct_regular_and_bold_faces() {
+        let regular = regular_system_fonts();
+        let bold = bold_system_fonts();
+        let regular = regular.first().expect("a macOS system font");
+        let bold = bold.first().expect("a bold macOS system font");
+
+        assert_eq!(regular.path, bold.path);
+        assert_ne!(
+            (regular.index, regular.weight, regular.optical_size),
+            (bold.index, bold.weight, bold.optical_size)
+        );
     }
 }
