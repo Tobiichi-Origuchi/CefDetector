@@ -14,7 +14,14 @@ function readJson(path) {
 
 function writeText(path, text) {
   const value = $(text);
-  if (!value.writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null)) {
+  if (
+    !value.writeToFileAtomicallyEncodingError(
+      path,
+      true,
+      $.NSUTF8StringEncoding,
+      null
+    )
+  ) {
     throw new Error(`Unable to write ${path}`);
   }
 }
@@ -37,7 +44,8 @@ function run(argv) {
     };
     for (const [name, paths] of Object.entries(reports)) {
       paths.sort();
-      writeText(`${output}/${name}`, paths.map(JSON.stringify).join("\n") + (paths.length ? "\n" : ""));
+      const text = paths.map(JSON.stringify).join("\n");
+      writeText(`${output}/${name}`, text + (paths.length ? "\n" : ""));
     }
     return "";
   }
