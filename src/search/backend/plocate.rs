@@ -88,7 +88,12 @@ impl CandidateSource for PlocateCandidateSource {
                 else {
                     continue;
                 };
-                candidates.push(ScanCandidate { path, kind });
+                candidates.push(ScanCandidate {
+                    path,
+                    kind,
+                    #[cfg(target_os = "macos")]
+                    application_root_hint: None,
+                });
             }
         }
 

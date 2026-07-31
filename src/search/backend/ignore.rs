@@ -27,9 +27,15 @@ fn drive_roots_from_mask(mask: u32) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn search_roots() -> io::Result<Vec<PathBuf>> {
     Ok(vec![PathBuf::from("/")])
+}
+
+#[cfg(target_os = "macos")]
+fn ignore_file_path() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join("Library/Application Support/cefdetector/.ignore")
 }
 
 #[cfg(target_os = "windows")]
@@ -98,6 +104,11 @@ fn is_platform_excluded(path: &std::path::Path) -> bool {
     .any(|root| path.starts_with(root))
 }
 
+#[cfg(target_os = "macos")]
+fn is_platform_excluded(path: &std::path::Path) -> bool {
+    super::super::macos::is_platform_excluded(path)
+}
+
 #[cfg(target_os = "windows")]
 fn windows_exclusion_roots(
     windows_dir: PathBuf,
@@ -157,7 +168,7 @@ fn is_platform_excluded(path: &std::path::Path) -> bool {
         .any(|root| path_starts_with_ignore_ascii_case(path, root))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn path_is_ignored(config: &IgnoreConfig, path: &std::path::Path) -> bool {
     config.abs_paths.contains(path)
 }
@@ -171,7 +182,7 @@ fn path_is_ignored(config: &IgnoreConfig, path: &std::path::Path) -> bool {
         .any(|ignored| path.eq_ignore_ascii_case(&ignored.to_string_lossy()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn directory_name_is_ignored(config: &IgnoreConfig, name: &std::ffi::OsStr) -> bool {
     config.dir_names.contains(name.to_string_lossy().as_ref())
 }
@@ -245,6 +256,8 @@ impl CandidateSource for IgnoreCandidateSource {
                         .push(ScanCandidate {
                             path: entry.into_path(),
                             kind,
+                            #[cfg(target_os = "macos")]
+                            application_root_hint: None,
                         });
                 }
                 WalkState::Continue
@@ -265,6 +278,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::drive_roots_from_mask;
+    #[cfg(target_os = "macos")]
+    use super::is_platform_excluded;
     #[cfg(target_os = "windows")]
     use super::{path_starts_with_ignore_ascii_case, windows_exclusion_roots};
 
@@ -274,6 +289,25 @@ mod tests {
             drive_roots_from_mask((1 << 2) | (1 << 25)),
             [PathBuf::from("C:\\"), PathBuf::from("Z:\\")]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_exclusions_avoid_duplicate_and_private_system_trees() {
+        for path in [
+            "/System/Volumes/Data/Applications",
+            "/private/var/folders/zz/cache",
+            "/Volumes/Disk/.Spotlight-V100/store",
+            "/Volumes/Backups/Backups.backupdb/Mac",
+        ] {
+            assert!(is_platform_excluded(std::path::Path::new(path)), "{path}");
+        }
+        assert!(!is_platform_excluded(std::path::Path::new(
+            "/System/Applications/Safari.app"
+        )));
+        assert!(!is_platform_excluded(std::path::Path::new(
+            "/Volumes/External/Apps/Demo.app"
+        )));
     }
 
     #[cfg(target_os = "windows")]

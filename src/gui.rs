@@ -761,6 +761,37 @@ fn bold_system_fonts() -> Vec<SystemFont> {
     ])
 }
 
+#[cfg(target_os = "macos")]
+fn fonts_from_macos_paths(paths: &[&str]) -> Vec<SystemFont> {
+    paths
+        .iter()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .map(|path| SystemFont { path, index: 0 })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn regular_system_fonts() -> Vec<SystemFont> {
+    fonts_from_macos_paths(&[
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ])
+}
+
+#[cfg(target_os = "macos")]
+fn bold_system_fonts() -> Vec<SystemFont> {
+    fonts_from_macos_paths(&[
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    ])
+}
+
 fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiError> {
     let regular_family = FontFamily::Name("cefdetector-regular".into());
     let bold_family = FontFamily::Name("cefdetector-bold".into());
@@ -876,6 +907,7 @@ impl EguiRenderer {
                 gl.get_parameter_string(egui_glow::glow::VENDOR),
             )
         };
+        eprintln!("Detected OpenGL {graphics}");
         let painter = egui_glow::Painter::new(Arc::clone(&gl), "", None, true).map_err(|error| {
             let platform_hint = if cfg!(target_os = "windows") {
                 " Windows requires a graphics driver that exposes OpenGL 2.0 or newer; \
@@ -1000,8 +1032,11 @@ impl GlutinWindow {
             .with_stencil_size(0)
             .with_transparency(false);
 
-        let (mut window, config) = glutin_winit::DisplayBuilder::new()
-            .with_preference(glutin_winit::ApiPreference::FallbackEgl)
+        let display_builder = glutin_winit::DisplayBuilder::new();
+        #[cfg(target_os = "linux")]
+        let display_builder =
+            display_builder.with_preference(glutin_winit::ApiPreference::FallbackEgl);
+        let (mut window, config) = display_builder
             .with_window_attributes(Some(window_attributes.clone()))
             .build(event_loop, config_template, |configs| {
                 configs
@@ -1030,11 +1065,20 @@ impl GlutinWindow {
                     .map_err(|error| GuiError(format!("failed to obtain window handle: {error}")))
             })
             .transpose()?;
+        #[cfg(not(target_os = "macos"))]
         let context_attributes = glutin::context::ContextAttributesBuilder::new()
             .with_context_api(glutin::context::ContextApi::OpenGl(Some(
                 glutin::context::Version::new(2, 0),
             )))
             .build(raw_window_handle);
+        #[cfg(target_os = "macos")]
+        let context_attributes = glutin::context::ContextAttributesBuilder::new()
+            .with_context_api(glutin::context::ContextApi::OpenGl(Some(
+                glutin::context::Version::new(3, 2),
+            )))
+            .with_profile(glutin::context::GlProfile::Core)
+            .build(raw_window_handle);
+        #[cfg(not(target_os = "macos"))]
         let fallback_attributes = glutin::context::ContextAttributesBuilder::new()
             .with_context_api(glutin::context::ContextApi::Gles(Some(
                 glutin::context::Version::new(2, 0),
@@ -1043,6 +1087,7 @@ impl GlutinWindow {
 
         // SAFETY: The attributes use the live window handle returned by winit and
         // the context remains owned alongside that window and display.
+        #[cfg(not(target_os = "macos"))]
         let not_current = unsafe { display.create_context(&config, &context_attributes) }.or_else(
             |desktop_error| {
                 // SAFETY: This uses the same live window handle and GL config.
@@ -1056,6 +1101,15 @@ impl GlutinWindow {
                 )
             },
         )?;
+        #[cfg(target_os = "macos")]
+        // SAFETY: The attributes use the live AppKit window handle returned by
+        // winit, and the CGL context remains owned alongside that window.
+        let not_current =
+            unsafe { display.create_context(&config, &context_attributes) }.map_err(|error| {
+                GuiError(format!(
+                    "failed to create an OpenGL 3.2 Core context: {error}"
+                ))
+            })?;
 
         let window = if let Some(window) = window.take() {
             window

@@ -2,17 +2,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::models::AppInfo;
 
 mod backend;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 
 use backend::CandidateKind;
 
@@ -77,14 +79,15 @@ struct CandidateFlags {
 }
 
 struct DetectedApp {
-    file: PathBuf,
+    display_path: PathBuf,
+    executable_path: Option<PathBuf>,
     app_type: &'static str,
     type_rank: u8,
     root: PathBuf,
     is_dir: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct FileIdentity {
     device: u64,
@@ -98,6 +101,15 @@ pub fn open_path(path: String, is_dir: bool) {
     } else if let Some(parent) = Path::new(&path).parent() {
         let _ = Command::new("xdg-open").arg(parent).spawn();
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_path(path: String, _is_dir: bool) {
+    let mut command = Command::new("/usr/bin/open");
+    if !path.contains("://") {
+        command.arg("-R");
+    }
+    let _ = command.arg(path).spawn();
 }
 
 #[cfg(target_os = "windows")]
@@ -154,7 +166,7 @@ pub fn open_path(path: String, is_dir: bool) {
 
 fn dir_size(dir: &Path) -> u64 {
     let mut total = 0_u64;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut visited = HashSet::new();
     let mut pending = vec![dir.to_path_buf()];
 
@@ -168,7 +180,7 @@ fn dir_size(dir: &Path) -> u64 {
                 continue;
             };
 
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             if !visited.insert(FileIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
@@ -239,6 +251,11 @@ fn get_running_processes() -> HashSet<PathBuf> {
         }
     }
     processes
+}
+
+#[cfg(target_os = "macos")]
+fn get_running_processes() -> HashSet<PathBuf> {
+    macos::running_processes()
 }
 
 #[cfg(target_os = "windows")]
@@ -333,6 +350,12 @@ fn process_is_running(processes: &HashSet<PathBuf>, path: &Path) -> bool {
         || fs::canonicalize(path).is_ok_and(|canonical| processes.contains(&canonical))
 }
 
+#[cfg(target_os = "macos")]
+fn process_is_running(processes: &HashSet<PathBuf>, path: &Path) -> bool {
+    processes.contains(path)
+        || fs::canonicalize(path).is_ok_and(|canonical| processes.contains(&canonical))
+}
+
 #[cfg(target_os = "windows")]
 fn process_is_running(processes: &HashSet<String>, path: &Path) -> bool {
     processes.contains(&normalize_windows_path(path))
@@ -416,7 +439,19 @@ fn scan_binary_file(path: &Path, flavor: ScanFlavor) -> io::Result<Option<AppKin
     let magic_len = file.read(&mut magic)?;
     let is_elf = magic_len >= 4 && magic == *b"\x7fELF";
     let is_pe = magic_len >= 2 && magic[..2] == *b"MZ";
-    if !is_elf && !is_pe {
+    let is_mach_o = magic_len >= 4
+        && matches!(
+            u32::from_be_bytes(magic),
+            0xfeed_face
+                | 0xcefa_edfe
+                | 0xfeed_facf
+                | 0xcffa_edfe
+                | 0xcafe_babe
+                | 0xbeba_feca
+                | 0xcafe_babf
+                | 0xbfba_feca
+        );
+    if !is_elf && !is_pe && !is_mach_o {
         return Ok(None);
     }
 
@@ -516,7 +551,7 @@ fn inspect_directory(dir: &Path, flavor: ScanFlavor) -> DirectoryInspection {
             }
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let is_executable = metadata.permissions().mode() & 0o111 != 0;
         #[cfg(target_os = "windows")]
         let is_executable = false;
@@ -595,7 +630,8 @@ fn detection_from_inspection(
     let type_rank = inspection.app_kind.map_or(0, AppKind::rank);
     if let Some(executable) = inspection.executable {
         Some(DetectedApp {
-            file: executable,
+            display_path: executable.clone(),
+            executable_path: Some(executable),
             app_type,
             type_rank,
             root: dir.to_path_buf(),
@@ -603,7 +639,8 @@ fn detection_from_inspection(
         })
     } else if inspection.app_kind.is_some() {
         Some(DetectedApp {
-            file: dir.to_path_buf(),
+            display_path: dir.to_path_buf(),
+            executable_path: None,
             app_type,
             type_rank,
             root: dir.to_path_buf(),
@@ -632,7 +669,8 @@ fn resolve_standard_candidate(
     }
 
     DetectedApp {
-        file: dir.to_path_buf(),
+        display_path: dir.to_path_buf(),
+        executable_path: None,
         app_type: default_type,
         type_rank: 0,
         root: dir.to_path_buf(),
@@ -653,6 +691,48 @@ fn insert_detection(apps: &mut BTreeMap<PathBuf, DetectedApp>, detected: Detecte
     }
 }
 
+#[cfg(target_os = "macos")]
+fn resolve_macos_bundle(root: &Path, candidates: &[backend::ScanCandidate]) -> DetectedApp {
+    let bundle = macos::inspect_bundle(root);
+    let mut app_kind = None;
+    let mut has_cef = false;
+    for candidate in candidates {
+        match candidate.kind {
+            CandidateKind::Cef => {
+                has_cef = true;
+                if candidate.path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .eq_ignore_ascii_case("Electron Framework")
+                }) {
+                    app_kind = strongest_signature(app_kind, Some(AppKind::Electron));
+                }
+                if let Ok(signature) = scan_binary_file(&candidate.path, ScanFlavor::Standard) {
+                    app_kind = strongest_signature(app_kind, signature);
+                }
+            }
+            CandidateKind::Node => {
+                if let Ok(signature) = scan_binary_file(&candidate.path, ScanFlavor::Mini) {
+                    app_kind = strongest_signature(app_kind, signature);
+                }
+            }
+            CandidateKind::Pak => {}
+        }
+    }
+    if let Some(executable) = &bundle.executable
+        && let Ok(signature) = scan_binary_file(executable, ScanFlavor::Standard)
+    {
+        app_kind = strongest_signature(app_kind, signature);
+    }
+    DetectedApp {
+        display_path: bundle.root.clone(),
+        executable_path: bundle.executable,
+        root: bundle.root,
+        app_type: app_kind.map_or(if has_cef { "CEF" } else { "Unknown" }, AppKind::label),
+        type_rank: app_kind.map_or(0, AppKind::rank),
+        is_dir: true,
+    }
+}
+
 fn is_ignored_candidate(path: &Path) -> bool {
     path.components().any(|component| {
         let component = component.as_os_str();
@@ -668,9 +748,20 @@ where
     let candidates = backend::find_candidates()?;
     let mut standard_dirs: BTreeMap<PathBuf, CandidateFlags> = BTreeMap::new();
     let mut node_dirs = HashSet::new();
+    #[cfg(target_os = "macos")]
+    let mut bundle_candidates: BTreeMap<PathBuf, Vec<backend::ScanCandidate>> = BTreeMap::new();
 
     for candidate in candidates {
         if is_ignored_candidate(&candidate.path) {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(root) = candidate
+            .application_root_hint
+            .clone()
+            .or_else(|| macos::outermost_bundle(&candidate.path))
+        {
+            bundle_candidates.entry(root).or_default().push(candidate);
             continue;
         }
         let Some(dir) = candidate.path.parent() else {
@@ -687,6 +778,13 @@ where
 
     let mut inspections = HashMap::new();
     let mut detected_by_root = BTreeMap::new();
+    #[cfg(target_os = "macos")]
+    for (root, candidates) in bundle_candidates {
+        insert_detection(
+            &mut detected_by_root,
+            resolve_macos_bundle(&root, &candidates),
+        );
+    }
     for (dir, flags) in standard_dirs {
         let default_type = if flags.cef { "CEF" } else { "Unknown" };
         let detected = resolve_standard_candidate(&dir, default_type, &mut inspections);
@@ -700,7 +798,8 @@ where
         if let Some(app_kind) = inspection.app_kind {
             let detected = detection_from_inspection(&dir, inspection, app_kind.label())
                 .unwrap_or_else(|| DetectedApp {
-                    file: dir.clone(),
+                    display_path: dir.clone(),
+                    executable_path: None,
                     app_type: app_kind.label(),
                     type_rank: app_kind.rank(),
                     root: dir.clone(),
@@ -727,14 +826,13 @@ where
     let detected: Vec<_> = detected_by_root.into_values().collect();
     let sizes = calculate_dir_sizes(&detected);
     for (app, size) in detected.into_iter().zip(sizes) {
-        let is_running = if app.is_dir {
-            false
-        } else {
-            process_is_running(&running_processes, &app.file)
-        };
+        let is_running = app
+            .executable_path
+            .as_deref()
+            .is_some_and(|path| process_is_running(&running_processes, path));
 
         on_found(AppInfo {
-            file: app.file.to_string_lossy().into_owned(),
+            file: app.display_path.to_string_lossy().into_owned(),
             app_type: app.app_type.to_owned(),
             size,
             is_running,
@@ -747,7 +845,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::backend::{CandidateKind, classify_candidate_name};
     #[cfg(target_os = "windows")]
@@ -755,9 +856,25 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::normalize_windows_path;
     use super::{
-        AppKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, is_relevant_shared_library,
+        AppKind, SIGNATURE_CHUNK_SIZE, ScanFlavor, is_relevant_shared_library, scan_binary_file,
         scan_signature_reader,
     };
+
+    static NEXT_BINARY: AtomicU64 = AtomicU64::new(0);
+
+    fn scan_fixture(magic: [u8; 4], signature: &[u8]) -> Option<AppKind> {
+        let sequence = NEXT_BINARY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "cefdetector-mach-o-{}-{sequence}",
+            std::process::id()
+        ));
+        let mut bytes = magic.to_vec();
+        bytes.extend_from_slice(signature);
+        fs::write(&path, bytes).unwrap();
+        let result = scan_binary_file(&path, ScanFlavor::Standard).unwrap();
+        fs::remove_file(path).unwrap();
+        result
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -798,6 +915,21 @@ mod tests {
         );
         assert_eq!(classify_candidate_name("libcefdetector.rmeta"), None);
         assert_eq!(classify_candidate_name("libnode_helpers.so"), None);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                classify_candidate_name("ELECTRON FRAMEWORK"),
+                Some(CandidateKind::Cef)
+            );
+            assert_eq!(
+                classify_candidate_name("LIBCEF.DYLIB"),
+                Some(CandidateKind::Cef)
+            );
+            assert_eq!(
+                classify_candidate_name("LIBNODE.DYLIB"),
+                Some(CandidateKind::Node)
+            );
+        }
     }
 
     #[test]
@@ -830,5 +962,73 @@ mod tests {
             scan_signature_reader(&mut reader, ScanFlavor::Standard).unwrap(),
             Some(AppKind::Nwjs)
         );
+    }
+
+    #[test]
+    fn all_mach_o_container_magics_are_scanned() {
+        for magic in [
+            0xfeed_face_u32,
+            0xcefa_edfe,
+            0xfeed_facf,
+            0xcffa_edfe,
+            0xcafe_babe,
+            0xbeba_feca,
+            0xcafe_babf,
+            0xbfba_feca,
+        ] {
+            assert_eq!(
+                scan_fixture(magic.to_be_bytes(), b"cef_string_utf8_to_utf16"),
+                Some(AppKind::Cef),
+                "magic {magic:#010x} was not scanned"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nested_bundle_candidates_collapse_to_main_application() {
+        use super::backend::ScanCandidate;
+        use super::{DetectedApp, insert_detection, resolve_macos_bundle};
+
+        let sequence = NEXT_BINARY.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "cefdetector-bundle-{}-{sequence}.app",
+            std::process::id()
+        ));
+        let executable = root.join("Contents/MacOS/Demo");
+        let framework = root.join("Contents/Frameworks/Electron Framework");
+        let helper =
+            root.join("Contents/Frameworks/Demo Helper.app/Contents/Frameworks/Electron Framework");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(framework.parent().unwrap()).unwrap();
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        let mut dictionary = plist::Dictionary::new();
+        dictionary.insert(
+            "CFBundleExecutable".into(),
+            plist::Value::String("Demo".into()),
+        );
+        plist::Value::Dictionary(dictionary)
+            .to_file_xml(root.join("Contents/Info.plist"))
+            .unwrap();
+        fs::write(&executable, 0xfeed_facf_u32.to_be_bytes()).unwrap();
+        for path in [&framework, &helper] {
+            let mut bytes = 0xfeed_facf_u32.to_be_bytes().to_vec();
+            bytes.extend_from_slice(b"third_party/electron_node");
+            fs::write(path, bytes).unwrap();
+        }
+
+        let candidates = [framework, helper].map(|path| ScanCandidate {
+            path,
+            kind: CandidateKind::Cef,
+            application_root_hint: Some(root.clone()),
+        });
+        let detected = resolve_macos_bundle(&root, &candidates);
+        assert_eq!(detected.display_path, root);
+        assert_eq!(detected.executable_path, Some(executable));
+        assert_eq!(detected.app_type, "Electron");
+        let mut applications = std::collections::BTreeMap::<PathBuf, DetectedApp>::new();
+        insert_detection(&mut applications, detected);
+        assert_eq!(applications.len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }

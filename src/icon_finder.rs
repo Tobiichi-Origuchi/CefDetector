@@ -37,6 +37,13 @@ static NEIGHBOR_ICON_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
+    #[cfg(target_os = "macos")]
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("icns"))
+    {
+        return decode_icns(path);
+    }
     let bytes: Arc<[u8]> = fs::read(path).ok()?.into();
     let is_svg = path
         .extension()
@@ -48,6 +55,23 @@ fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
     } else {
         RawIcon::PngOrIco(bytes)
     })
+}
+
+#[cfg(target_os = "macos")]
+fn decode_icns(path: &Path) -> Option<RawIcon> {
+    let family = icns::IconFamily::read(fs::File::open(path).ok()?).ok()?;
+    let icon_type = family
+        .available_icons()
+        .into_iter()
+        .max_by_key(|icon_type| {
+            icon_type
+                .pixel_width()
+                .saturating_mul(icon_type.pixel_height())
+        })?;
+    let image = family.get_icon_with_type(icon_type).ok()?;
+    let mut png = Vec::new();
+    image.write_png(&mut png).ok()?;
+    Some(RawIcon::PngOrIco(png.into()))
 }
 
 #[cfg(target_os = "linux")]
@@ -524,6 +548,17 @@ pub fn get_app_icon(path: String) -> RawIcon {
         return cached.clone();
     }
 
+    #[cfg(target_os = "macos")]
+    if let Some(icon_path) = crate::search::macos::bundle_icon_path(exe_path)
+        && let Some(icon) = try_icon_from_path(&icon_path)
+    {
+        RAW_ICON_CACHE
+            .lock()
+            .unwrap()
+            .insert(exe_path.to_path_buf(), icon.clone());
+        return icon;
+    }
+
     if let Some(b) = find_icon_via_pe(exe_path) {
         let result = b;
         RAW_ICON_CACHE
@@ -606,5 +641,31 @@ Icon=wrong-icon\n";
         let (executables, icon) = parse_desktop_entry(entry).unwrap();
         assert_eq!(executables, ["example", "example"]);
         assert_eq!(icon, "example-icon");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::fs;
+
+    use super::{RawIcon, decode_icns};
+
+    #[test]
+    fn icns_is_decoded_to_png_for_the_existing_gui_pipeline() {
+        let mut image = icns::Image::new(icns::PixelFormat::RGBA, 32, 32);
+        for pixel in image.data_mut().chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[20, 100, 220, 255]);
+        }
+        let mut family = icns::IconFamily::new();
+        family.add_icon(&image).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("cefdetector-icon-{}.icns", std::process::id()));
+        family.write(fs::File::create(&path).unwrap()).unwrap();
+        let icon = decode_icns(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        let RawIcon::PngOrIco(bytes) = icon else {
+            panic!("decoded ICNS did not use the raster icon path");
+        };
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 }

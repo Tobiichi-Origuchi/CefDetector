@@ -344,7 +344,12 @@ impl CandidateSource for EverythingCandidateSource {
             if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
                 continue;
             }
-            candidates.push(ScanCandidate { path, kind });
+            candidates.push(ScanCandidate {
+                path,
+                kind,
+                #[cfg(target_os = "macos")]
+                application_root_hint: None,
+            });
         }
 
         candidates.sort_by(|left, right| left.path.cmp(&right.path));
