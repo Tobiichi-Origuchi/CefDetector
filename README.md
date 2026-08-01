@@ -24,12 +24,22 @@ Check how many CEFs are on your computer
 | Linux x86_64 | plocate | `cefdetector-<version>-linux-x86_64-plocate.tar.gz` |
 | Windows x86_64 | ignore | `cefdetector-<version>-windows-x86_64-ignore.zip` |
 | Windows x86_64 | Everything IPC | `cefdetector-<version>-windows-x86_64-everything.zip` |
+| macOS aarch64 | ignore | `cefdetector-<version>-macos-aarch64-ignore.zip` |
+| macOS aarch64 | Spotlight | `cefdetector-<version>-macos-aarch64-spotlight.zip` |
 
-(macOS to be continued...)
+其他架构自行编译测试
+
+### 通用
 
 ignore 后端就是用 rust 的 ignore 库多线程枚举所有路径，速度相对慢，内存占用更高，更吃 CPU 的性能，唯一的好处是不用额外的依赖
 
+### Windows 专用
+
 Everything 后端需要预先安装并运行[Everything](https://www.voidtools.com/)，同时启用 IPC（精简版没有 IPC，所以不支持）
+
+Everything 后端比 ignore 快的多
+
+### Linux 专用
 
 plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的目录不会被检测，而且它似乎不一定比 ignore 更快
 
@@ -45,6 +55,10 @@ plocate 只能搜索数据库中已有的路径，bind mount 等未被索引的�
 > 2. replace `PRUNE_BIND_MOUNTS = "yes"` with `PRUNE_BIND_MOUNTS = "no"`
 > 3. save the file
 > 4. update the db with `sudo updatedb`
+
+### macOS 专用
+
+spotlight 后端就是调用 mdfind 搜索，速度比 ignore 快的多
 
 ## 使用
 
@@ -117,8 +131,16 @@ Summary:
 
 由于只有虚拟机，而且虚拟机中的 CEF 软件数量太少，测试结果没有代表性，如果有好心人愿意测试，可以：
 
-1. 安装 rust toolchain 1.92-x86_64-pc-windows-msvc
+1. 安装 rust toolchain 1.92.0-x86_64-pc-windows-msvc
 2. 运行 `pwsh -NoProfile -File .\benchmark.ps1`
+3. 将结果发在 issue
+
+### macOS
+
+由于只有虚拟机，而且虚拟机中的 CEF 软件数量太少，测试结果没有代表性，如果有好心人愿意测试，可以：
+
+1. 安装 rust toolchain 1.92.0-aarch64-apple-darwin
+2. 运行 `./benchmark_macos.sh`
 3. 将结果发在 issue
 
 ## 作者
