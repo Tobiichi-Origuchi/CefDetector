@@ -122,7 +122,7 @@ package_backend() {
         ignore)
             ;;
         plocate)
-            cargo_arguments+=(--no-default-features --features plocate)
+            cargo_arguments+=(--no-default-features --features "gui,plocate")
             ;;
         *)
             package_fail "unknown Linux backend: ${backend}"

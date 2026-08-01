@@ -14,7 +14,7 @@ mkdir -p "${output_dir}"
 
 for backend in ignore spotlight; do
   if [[ "${backend}" == "spotlight" ]]; then
-    cargo build --locked --release --no-default-features --features spotlight
+    cargo build --locked --release --no-default-features --features gui,spotlight
   else
     cargo build --locked --release
   fi

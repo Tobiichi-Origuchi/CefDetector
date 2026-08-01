@@ -271,7 +271,7 @@ bench_build_binaries() {
     install -m755 target/release/cefdetector "${BENCH_IGNORE_BINARY}"
 
     printf 'Building locked release binary for the Spotlight backend...\n'
-    cargo build --locked --release --no-default-features --features spotlight
+    cargo build --locked --release --no-default-features --features gui,spotlight
     install -m755 target/release/cefdetector "${BENCH_SPOTLIGHT_BINARY}"
 }
 

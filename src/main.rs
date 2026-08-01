@@ -1,17 +1,23 @@
 mod cli;
+#[cfg(feature = "gui")]
 mod gui;
 
+#[cfg(feature = "gui")]
 pub mod icon_finder;
 pub mod models;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "gui", target_os = "linux"))]
 pub mod package_manager;
 pub mod search;
 
 fn main() {
     cli::handle_cli();
 
+    #[cfg(feature = "gui")]
     if let Err(error) = gui::run() {
         eprintln!("Failed to start the GUI: {error}");
         std::process::exit(1);
     }
+
+    #[cfg(not(feature = "gui"))]
+    cli::print_help();
 }

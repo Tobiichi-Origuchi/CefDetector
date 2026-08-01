@@ -278,7 +278,7 @@ bench_build_binaries() {
     install -m755 target/release/cefdetector "${BENCH_IGNORE_BINARY}"
 
     printf 'Building locked release binary for the plocate backend...\n'
-    cargo build --locked --release --no-default-features --features plocate
+    cargo build --locked --release --no-default-features --features gui,plocate
     install -m755 target/release/cefdetector "${BENCH_PLOCATE_BINARY}"
 }
 

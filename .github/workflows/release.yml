@@ -131,8 +131,8 @@ jobs:
 
       - name: Validate plocate backend
         run: |
-          cargo test --locked --no-default-features --features plocate --all-targets
-          cargo clippy --locked --no-default-features --features plocate --all-targets -- -D warnings
+          cargo test --locked --no-default-features --features gui,plocate --all-targets
+          cargo clippy --locked --no-default-features --features gui,plocate --all-targets -- -D warnings
 
       - name: Build Linux archives
         env:
@@ -178,7 +178,7 @@ jobs:
           - backend: ignore
             cargo_args: ""
           - backend: everything
-            cargo_args: --no-default-features --features everything
+            cargo_args: --no-default-features --features gui,everything
 
     steps:
       - name: Check out release tag
@@ -281,8 +281,8 @@ jobs:
         run: |
           cargo test --locked --all-targets
           cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked --no-default-features --features spotlight --all-targets
-          cargo clippy --locked --no-default-features --features spotlight --all-targets -- -D warnings
+          cargo test --locked --no-default-features --features gui,spotlight --all-targets
+          cargo clippy --locked --no-default-features --features gui,spotlight --all-targets -- -D warnings
 
       - name: Build ad-hoc signed app bundles
         env:

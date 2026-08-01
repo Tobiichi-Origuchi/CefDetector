@@ -10,39 +10,58 @@ rust-version = "1.92.0"
 
 [features]
 # Search backends are compile-time selections; backend.rs enforces exactly one.
-default = ["ignore"]
+default = ["gui", "ignore"]
+gui = [
+    "dep:backhand",
+    "dep:egui",
+    "dep:egui_glow",
+    "dep:glutin",
+    "dep:glutin-winit",
+    "dep:icns",
+    "dep:image",
+    "dep:memmap2",
+    "dep:pelite",
+    "dep:resvg",
+    "windows-sys/Win32_UI_Shell",
+    "windows-sys/Win32_UI_WindowsAndMessaging",
+]
 ignore = ["dep:ignore"]
 plocate = []
-everything = []
+everything = [
+    "windows-sys/Win32_Graphics_Gdi",
+    "windows-sys/Win32_System_DataExchange",
+    "windows-sys/Win32_System_LibraryLoader",
+    "windows-sys/Win32_UI_WindowsAndMessaging",
+]
 spotlight = []
 
 [dependencies]
-pelite = "0.10.0"
+pelite = { version = "0.10.0", optional = true }
 ignore = { version = "0.4.31", optional = true }
 memchr = "2.8.3"
-image = { version = "0.25.10", default-features = false, features = ["png", "ico", "webp"] }
-egui = { version = "0.35.0", default-features = false }
-resvg = { version = "0.47.0", default-features = false }
+image = { version = "0.25.10", optional = true, default-features = false, features = ["png", "ico", "webp"] }
+egui = { version = "0.35.0", optional = true, default-features = false }
+resvg = { version = "0.47.0", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-backhand = { version = "0.25.1", default-features = false, features = ["gzip", "lz4", "xz", "zstd"] }
-egui_glow = { version = "0.35.0", default-features = false, features = ["wayland", "winit", "x11"] }
-glutin = { version = "0.32.3", default-features = false, features = ["egl", "glx", "wayland", "x11"] }
-glutin-winit = { version = "0.5.0", default-features = false, features = ["egl", "glx", "wayland", "x11"] }
-memmap2 = "0.9.11"
+backhand = { version = "0.25.1", optional = true, default-features = false, features = ["gzip", "lz4", "xz", "zstd"] }
+egui_glow = { version = "0.35.0", optional = true, default-features = false, features = ["wayland", "winit", "x11"] }
+glutin = { version = "0.32.3", optional = true, default-features = false, features = ["egl", "glx", "wayland", "x11"] }
+glutin-winit = { version = "0.5.0", optional = true, default-features = false, features = ["egl", "glx", "wayland", "x11"] }
+memmap2 = { version = "0.9.11", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-egui_glow = { version = "0.35.0", default-features = false, features = ["winit"] }
-glutin = { version = "0.32.3", default-features = false, features = ["wgl"] }
-glutin-winit = { version = "0.5.0", default-features = false, features = ["wgl"] }
-memmap2 = "0.9.11"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+egui_glow = { version = "0.35.0", optional = true, default-features = false, features = ["winit"] }
+glutin = { version = "0.32.3", optional = true, default-features = false, features = ["wgl"] }
+glutin-winit = { version = "0.5.0", optional = true, default-features = false, features = ["wgl"] }
+memmap2 = { version = "0.9.11", optional = true }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-egui_glow = { version = "0.35.0", default-features = false, features = ["winit"] }
-glutin = { version = "0.32.3", default-features = false }
-glutin-winit = { version = "0.5.0", default-features = false }
-icns = "0.4.0"
+egui_glow = { version = "0.35.0", optional = true, default-features = false, features = ["winit"] }
+glutin = { version = "0.32.3", optional = true, default-features = false }
+glutin-winit = { version = "0.5.0", optional = true, default-features = false }
+icns = { version = "0.4.0", optional = true }
 plist = { version = "1.8.0", default-features = false }
 
 [profile.release]

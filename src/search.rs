@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(all(feature = "gui", any(target_os = "linux", target_os = "macos")))]
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,7 +94,7 @@ struct FileIdentity {
     inode: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "gui", target_os = "linux"))]
 pub fn open_path(path: String, is_dir: bool) {
     if path.contains("://") || is_dir {
         let _ = Command::new("xdg-open").arg(path).spawn();
@@ -103,7 +103,7 @@ pub fn open_path(path: String, is_dir: bool) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 pub fn open_path(path: String, _is_dir: bool) {
     let mut command = Command::new("/usr/bin/open");
     if !path.contains("://") {
@@ -112,7 +112,7 @@ pub fn open_path(path: String, _is_dir: bool) {
     let _ = command.arg(path).spawn();
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "gui", target_os = "windows"))]
 fn explorer_select_argument(path: &std::ffi::OsStr) -> std::ffi::OsString {
     use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 
@@ -122,7 +122,7 @@ fn explorer_select_argument(path: &std::ffi::OsStr) -> std::ffi::OsString {
     std::ffi::OsString::from_wide(&argument)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(feature = "gui", target_os = "windows"))]
 pub fn open_path(path: String, is_dir: bool) {
     use std::os::windows::ffi::OsStrExt as _;
 
@@ -852,7 +852,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::backend::{CandidateKind, classify_candidate_name};
-    #[cfg(target_os = "windows")]
+    #[cfg(all(feature = "gui", target_os = "windows"))]
     use super::explorer_select_argument;
     #[cfg(target_os = "windows")]
     use super::normalize_windows_path;
@@ -877,7 +877,7 @@ mod tests {
         result
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(feature = "gui", target_os = "windows"))]
     #[test]
     fn explorer_selection_quotes_paths_with_spaces_and_unicode() {
         let path = std::ffi::OsStr::new(r"C:\Program Files (x86)\示例 应用\应用程序.exe");

@@ -95,7 +95,7 @@ function Build-BenchmarkBinaries {
             "--release",
             "--no-default-features",
             "--features",
-            "everything"
+            "gui,everything"
         ) `
         -Destination $everythingBinary
 }

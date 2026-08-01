@@ -12,6 +12,20 @@ enum OutputFormat {
     Csv,
 }
 
+pub fn print_help() {
+    println!("CEF Detector {}", VERSION);
+    println!();
+    println!("Usage: cefdetector [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  -h, --help       Print help information");
+    println!("  -V, --version    Print version information");
+    println!("  -T, --toml       Output results in TOML format");
+    println!("  -J, --json       Output results in JSON format");
+    println!("  -C, --csv        Output results in CSV format");
+    println!("  -O, --output     Output results to the specified file path instead of stdout");
+}
+
 fn push_json_string(output: &mut String, value: &str) {
     output.push('"');
     for ch in value.chars() {
@@ -93,17 +107,7 @@ pub fn handle_cli() {
     }
 
     if show_help {
-        println!("CEF Detector {}", VERSION);
-        println!();
-        println!("Usage: cefdetector [OPTIONS]");
-        println!();
-        println!("Options:");
-        println!("  -h, --help       Print help information");
-        println!("  -V, --version    Print version information");
-        println!("  -T, --toml       Output results in TOML format");
-        println!("  -J, --json       Output results in JSON format");
-        println!("  -C, --csv        Output results in CSV format");
-        println!("  -O, --output     Output results to the specified file path instead of stdout");
+        print_help();
         std::process::exit(0);
     }
 

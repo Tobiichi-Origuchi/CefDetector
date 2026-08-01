@@ -208,10 +208,10 @@ printf 'Running release checks...\n'
 cargo fmt --all -- --check
 cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --no-default-features --features plocate --all-targets
-cargo clippy --locked --no-default-features --features plocate --all-targets -- -D warnings
+cargo test --locked --no-default-features --features gui,plocate --all-targets
+cargo clippy --locked --no-default-features --features gui,plocate --all-targets -- -D warnings
 cargo build --locked --release
-cargo build --locked --release --no-default-features --features plocate
+cargo build --locked --release --no-default-features --features gui,plocate
 git diff --check
 
 if [[ "${CURRENT_VERSION}" != "${RAW_VERSION}" ]]; then
