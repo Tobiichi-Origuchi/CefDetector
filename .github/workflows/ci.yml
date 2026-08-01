@@ -182,8 +182,10 @@ jobs:
       - name: Verify Apple Silicon host
         run: |
           test "$(uname -m)" = "arm64"
-          rustc -vV
-          rustc -vV | grep -q '^host: aarch64-apple-darwin$'
+          rustc_details="$(rustc -vV)"
+          printf '%s\n' "${rustc_details}"
+          rust_host="$(awk '$1 == "host:" { print $2 }' <<<"${rustc_details}")"
+          test "${rust_host}" = "aarch64-apple-darwin"
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1

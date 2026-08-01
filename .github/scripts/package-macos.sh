@@ -6,7 +6,11 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "Release macOS packages must be built on an arm64 macOS host" >&2
   exit 1
 fi
-if ! rustc -vV | grep -q '^host: aarch64-apple-darwin$'; then
+rust_host="$(
+  rustc -vV |
+    awk '$1 == "host:" { print $2 }'
+)"
+if [[ "${rust_host}" != "aarch64-apple-darwin" ]]; then
   echo "Release Rust host must be aarch64-apple-darwin" >&2
   exit 1
 fi
@@ -24,13 +28,14 @@ for backend in ignore spotlight; do
   fi
   binary="${binary_dir}/cefdetector-${backend}"
   cp "${project_dir}/target/release/cefdetector" "${binary}"
-  file "${binary}"
-  lipo -info "${binary}"
-  if ! file "${binary}" | grep -q 'arm64'; then
+  file_description="$(file "${binary}")"
+  lipo_description="$(lipo -info "${binary}")"
+  printf '%s\n' "${file_description}" "${lipo_description}"
+  if [[ "${file_description}" != *arm64* ]]; then
     echo "Packaged binary is not arm64: ${binary}" >&2
     exit 1
   fi
-  if lipo -info "${binary}" | grep -q 'x86_64'; then
+  if [[ "${lipo_description}" == *x86_64* ]]; then
     echo "Packaged binary contains a forbidden x86_64 slice: ${binary}" >&2
     exit 1
   fi
@@ -45,7 +50,12 @@ for backend in ignore spotlight; do
   chmod 755 "${bundle}/Contents/MacOS/cefdetector"
   codesign --force --deep --sign - "${bundle}"
   codesign --verify --deep --strict --verbose=2 "${bundle}"
-  codesign --display --verbose=4 "${bundle}" 2>&1 | grep -q '^Signature=adhoc$'
+  codesign_description="$(codesign --display --verbose=4 "${bundle}" 2>&1)"
+  printf '%s\n' "${codesign_description}"
+  if ! grep -Fxq 'Signature=adhoc' <<<"${codesign_description}"; then
+    echo "Packaged application is not ad-hoc signed: ${bundle}" >&2
+    exit 1
+  fi
   archive="${output_dir}/cefdetector-${version}-macos-aarch64-${backend}.zip"
   rm -f "${archive}"
   ditto -c -k --sequesterRsrc --keepParent "${bundle}" "${archive}"
