@@ -261,7 +261,6 @@ dependencies = [
  "pelite",
  "plist",
  "resvg",
- "skrifa",
  "windows-sys 0.61.2",
 ]
 

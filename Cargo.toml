@@ -20,7 +20,6 @@ spotlight = []
 pelite = "0.10.0"
 ignore = { version = "0.4.31", optional = true }
 memchr = "2.8.3"
-memmap2 = "0.9.11"
 image = { version = "0.25.10", default-features = false, features = ["png", "ico", "webp"] }
 egui = { version = "0.35.0", default-features = false }
 resvg = { version = "0.47.0", default-features = false }
@@ -30,11 +29,13 @@ backhand = { version = "0.25.1", default-features = false, features = ["gzip", "
 egui_glow = { version = "0.35.0", default-features = false, features = ["wayland", "winit", "x11"] }
 glutin = { version = "0.32.3", default-features = false, features = ["egl", "glx", "wayland", "x11"] }
 glutin-winit = { version = "0.5.0", default-features = false, features = ["egl", "glx", "wayland", "x11"] }
+memmap2 = "0.9.11"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 egui_glow = { version = "0.35.0", default-features = false, features = ["winit"] }
 glutin = { version = "0.32.3", default-features = false, features = ["wgl"] }
 glutin-winit = { version = "0.5.0", default-features = false, features = ["wgl"] }
+memmap2 = "0.9.11"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -43,7 +44,6 @@ glutin = { version = "0.32.3", default-features = false }
 glutin-winit = { version = "0.5.0", default-features = false }
 icns = "0.4.0"
 plist = { version = "1.8.0", default-features = false }
-skrifa = "0.42.1"
 
 [profile.release]
 opt-level = "z"

@@ -1,15 +1,24 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
+
+#[cfg(not(target_os = "macos"))]
 use egui::text::TextWrapping;
 use egui::{
-    Align2, Color32, ColorImage, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Id,
-    Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, pos2, vec2,
+    Color32, ColorImage, CursorIcon, Id, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Vec2, pos2, vec2,
 };
+#[cfg(not(target_os = "macos"))]
+use egui::{FontData, FontDefinitions, FontFamily, FontId};
 use egui_glow::egui_winit::winit;
 use glutin::context::PossiblyCurrentContext;
 use glutin::display::Display;
@@ -18,6 +27,9 @@ use winit::raw_window_handle::HasWindowHandle as _;
 
 use crate::icon_finder::{RawIcon, get_app_icon};
 use crate::search::core_search;
+
+#[cfg(target_os = "macos")]
+mod macos_text;
 
 const WINDOW_TITLE: &str = "CEF Detector";
 #[cfg(target_os = "linux")]
@@ -67,6 +79,11 @@ struct AppItem {
     raw_size: i32,
 }
 
+#[cfg(target_os = "macos")]
+type PreparedText = macos_text::NativeText;
+#[cfg(not(target_os = "macos"))]
+type PreparedText = Arc<egui::Galley>;
+
 enum SearchMessage {
     Batch {
         items: Vec<PendingItem>,
@@ -91,12 +108,17 @@ struct Frontend {
     background: TextureHandle,
     default_icon: TextureHandle,
     decoded_icons: HashMap<u64, TextureHandle>,
+    #[cfg(target_os = "macos")]
+    text_renderer: RefCell<macos_text::CoreTextRenderer>,
+    #[cfg(not(target_os = "macos"))]
     regular_font: FontFamily,
+    #[cfg(not(target_os = "macos"))]
     bold_font: FontFamily,
 }
 
 impl Frontend {
     fn new(ctx: &egui::Context) -> Result<Self, GuiError> {
+        #[cfg(not(target_os = "macos"))]
         let (regular_font, bold_font) = configure_fonts(ctx)?;
 
         let background = load_texture(
@@ -126,7 +148,11 @@ impl Frontend {
             background,
             default_icon,
             decoded_icons: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            text_renderer: RefCell::new(macos_text::CoreTextRenderer::new()),
+            #[cfg(not(target_os = "macos"))]
             regular_font,
+            #[cfg(not(target_os = "macos"))]
             bold_font,
         })
     }
@@ -209,16 +235,28 @@ impl Frontend {
 
         paint_cover_image(&painter, root, &self.background);
 
-        painter.text(
-            pos2(root.left() + width * 0.5, root.top() + height * 0.21),
-            Align2::CENTER_TOP,
+        let status_color = if self.search_done {
+            Color32::from_rgb(33, 150, 243)
+        } else {
+            Color32::WHITE
+        };
+        let status = self.layout_text(
+            &painter,
             &self.search_status,
-            FontId::new(18.0, self.bold_font.clone()),
-            if self.search_done {
-                Color32::from_rgb(33, 150, 243)
-            } else {
-                Color32::WHITE
-            },
+            18.0,
+            true,
+            status_color,
+            None,
+        );
+        let status_size = prepared_text_size(&status);
+        paint_prepared_text(
+            &painter,
+            pos2(
+                root.left() + width * 0.5 - status_size.x * 0.5,
+                root.top() + height * 0.21,
+            ),
+            &status,
+            status_color,
         );
 
         self.paint_grid(ui, root);
@@ -343,26 +381,22 @@ impl Frontend {
         } else {
             Color32::BLACK
         };
-        let filename = layout_elided(
+        let filename = self.layout_text(
             painter,
             &item.filename,
-            FontId::new(11.0, self.bold_font.clone()),
+            11.0,
+            true,
             running_color,
-            76.0,
+            Some(76.0),
         );
-        let app_type = painter.layout_no_wrap(
-            item.app_type.clone(),
-            FontId::new(10.0, self.regular_font.clone()),
-            running_color,
-        );
-        let size = painter.layout_no_wrap(
-            item.size_str.clone(),
-            FontId::new(9.0, self.regular_font.clone()),
-            Color32::from_black_alpha(214),
-        );
+        let app_type = self.layout_text(painter, &item.app_type, 10.0, false, running_color, None);
+        let size_color = Color32::from_black_alpha(214);
+        let size = self.layout_text(painter, &item.size_str, 9.0, false, size_color, None);
+        let filename_size = prepared_text_size(&filename);
+        let app_type_size = prepared_text_size(&app_type);
+        let size_size = prepared_text_size(&size);
 
-        let content_height =
-            36.0 + filename.size().y + app_type.size().y + size.size().y + 3.0 * 2.0;
+        let content_height = 36.0 + filename_size.y + app_type_size.y + size_size.y + 3.0 * 2.0;
         let mut y = card.top() + 12.0 + ((CARD_HEIGHT - 24.0 - content_height) * 0.5).max(0.0);
         let center_x = card.center().x;
 
@@ -382,23 +416,62 @@ impl Frontend {
         );
         let text_painter = painter.with_clip_rect(text_clip);
 
-        text_painter.galley(
-            pos2(center_x - filename.size().x * 0.5, y),
-            filename.clone(),
+        paint_prepared_text(
+            &text_painter,
+            pos2(center_x - filename_size.x * 0.5, y),
+            &filename,
             running_color,
         );
-        y += filename.size().y + 2.0;
-        text_painter.galley(
-            pos2(center_x - app_type.size().x * 0.5, y),
-            app_type.clone(),
+        y += filename_size.y + 2.0;
+        paint_prepared_text(
+            &text_painter,
+            pos2(center_x - app_type_size.x * 0.5, y),
+            &app_type,
             running_color,
         );
-        y += app_type.size().y + 2.0;
-        text_painter.galley(
-            pos2(center_x - size.size().x * 0.5, y),
-            size,
-            Color32::from_black_alpha(214),
+        y += app_type_size.y + 2.0;
+        paint_prepared_text(
+            &text_painter,
+            pos2(center_x - size_size.x * 0.5, y),
+            &size,
+            size_color,
         );
+    }
+
+    fn layout_text(
+        &self,
+        painter: &egui::Painter,
+        text: &str,
+        point_size: f32,
+        bold: bool,
+        color: Color32,
+        max_width: Option<f32>,
+    ) -> PreparedText {
+        #[cfg(target_os = "macos")]
+        {
+            self.text_renderer.borrow_mut().layout(
+                painter.ctx(),
+                text,
+                point_size,
+                bold,
+                color,
+                max_width,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let family = if bold {
+                self.bold_font.clone()
+            } else {
+                self.regular_font.clone()
+            };
+            let font_id = FontId::new(point_size, family);
+            if let Some(max_width) = max_width {
+                layout_elided(painter, text, font_id, color, max_width)
+            } else {
+                painter.layout_no_wrap(text.to_owned(), font_id, color)
+            }
+        }
     }
 
     fn paint_scrollbar(
@@ -472,13 +545,17 @@ impl Frontend {
     }
 
     fn paint_repository_link(&self, ui: &mut egui::Ui, root: Rect) {
-        let font_id = FontId::new(12.0, self.regular_font.clone());
         let normal_color = Color32::from_white_alpha(204);
-        let measured_galley =
-            ui.painter()
-                .layout_no_wrap(REPOSITORY_TEXT.into(), font_id.clone(), normal_color);
+        let measured_text = self.layout_text(
+            ui.painter(),
+            REPOSITORY_TEXT,
+            12.0,
+            false,
+            normal_color,
+            None,
+        );
         let position = pos2(root.left() + 10.0, root.bottom() - 32.0);
-        let link_rect = Rect::from_min_size(position, measured_galley.size());
+        let link_rect = Rect::from_min_size(position, prepared_text_size(&measured_text));
         let response = ui.interact(link_rect, Id::new("repository-link"), Sense::click());
 
         if response.hovered() {
@@ -493,14 +570,48 @@ impl Frontend {
         } else {
             normal_color
         };
-        let galley = if response.hovered() {
-            ui.painter()
-                .layout_no_wrap(REPOSITORY_TEXT.into(), font_id, color)
+        let text = if response.hovered() {
+            self.layout_text(ui.painter(), REPOSITORY_TEXT, 12.0, false, color, None)
         } else {
-            measured_galley
+            measured_text
         };
-        ui.painter().galley(position, galley, color);
+        paint_prepared_text(ui.painter(), position, &text, color);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn prepared_text_size(text: &PreparedText) -> Vec2 {
+    text.size
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prepared_text_size(text: &PreparedText) -> Vec2 {
+    text.size()
+}
+
+#[cfg(target_os = "macos")]
+fn paint_prepared_text(
+    painter: &egui::Painter,
+    position: Pos2,
+    text: &PreparedText,
+    _color: Color32,
+) {
+    painter.image(
+        text.texture.id(),
+        Rect::from_min_size(position, text.size),
+        Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paint_prepared_text(
+    painter: &egui::Painter,
+    position: Pos2,
+    text: &PreparedText,
+    color: Color32,
+) {
+    painter.galley(position, text.clone(), color);
 }
 
 fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
@@ -668,6 +779,7 @@ fn paint_cover_image(painter: &egui::Painter, rect: Rect, texture: &TextureHandl
     painter.image(texture.id(), rect, uv, Color32::WHITE);
 }
 
+#[cfg(not(target_os = "macos"))]
 fn layout_elided(
     painter: &egui::Painter,
     text: &str,
@@ -680,12 +792,11 @@ fn layout_elided(
     painter.layout_job(job)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone)]
 struct SystemFont {
     path: PathBuf,
     index: u32,
-    weight: Option<f32>,
-    optical_size: Option<f32>,
 }
 
 #[cfg(target_os = "linux")]
@@ -702,12 +813,7 @@ fn match_system_font(pattern: &str) -> Option<SystemFont> {
     let mut lines = output.lines();
     let path = PathBuf::from(lines.next()?);
     let index = lines.next()?.parse().ok()?;
-    path.is_file().then_some(SystemFont {
-        path,
-        index,
-        weight: None,
-        optical_size: None,
-    })
+    path.is_file().then_some(SystemFont { path, index })
 }
 
 #[cfg(target_os = "linux")]
@@ -742,12 +848,7 @@ fn fonts_from_windows_directory(file_names: &[&str]) -> Vec<SystemFont> {
         .iter()
         .map(|file_name| fonts_dir.join(file_name))
         .filter(|path| path.is_file())
-        .map(|path| SystemFont {
-            path,
-            index: 0,
-            weight: None,
-            optical_size: None,
-        })
+        .map(|path| SystemFont { path, index: 0 })
         .collect()
 }
 
@@ -773,99 +874,7 @@ fn bold_system_fonts() -> Vec<SystemFont> {
     ])
 }
 
-#[cfg(target_os = "macos")]
-fn macos_font(path: &str, index: u32) -> Option<SystemFont> {
-    let path = PathBuf::from(path);
-    path.is_file().then_some(SystemFont {
-        path,
-        index,
-        weight: None,
-        optical_size: None,
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn macos_font_by_postscript_name(
-    path: &str,
-    postscript_name: &str,
-    weight: Option<f32>,
-    optical_size: Option<f32>,
-) -> Option<SystemFont> {
-    use skrifa::raw::TableProvider as _;
-    use skrifa::raw::types::NameId;
-
-    let path = PathBuf::from(path);
-    let file = std::fs::File::open(&path).ok()?;
-    // SAFETY: The mapping is read-only and remains alive for the duration of
-    // all font-table references created below.
-    let mapping = unsafe { memmap2::MmapOptions::new().map(&file).ok()? };
-    let fonts = skrifa::raw::FileRef::new(&mapping).ok()?;
-
-    fonts.fonts().enumerate().find_map(|(index, font)| {
-        let name = font.ok()?.name().ok()?;
-        let string_data = name.string_data();
-        let matches = name
-            .name_record()
-            .iter()
-            .filter(|record| record.name_id() == NameId::POSTSCRIPT_NAME)
-            .filter_map(|record| record.string(string_data).ok())
-            .any(|name| name.chars().eq(postscript_name.chars()));
-        matches.then(|| SystemFont {
-            path: path.clone(),
-            index: index as u32,
-            weight,
-            optical_size,
-        })
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn push_unique_font(fonts: &mut Vec<SystemFont>, font: Option<SystemFont>) {
-    if let Some(font) = font
-        && !fonts.contains(&font)
-    {
-        fonts.push(font);
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_system_fonts(
-    sfns_weight: f32,
-    hiragino_name: &str,
-    hiragino_index: u32,
-    helvetica_index: u32,
-) -> Vec<SystemFont> {
-    const SFNS: &str = "/System/Library/Fonts/SFNS.ttf";
-    const HIRAGINO: &str = "/System/Library/Fonts/Hiragino Sans GB.ttc";
-    const HELVETICA: &str = "/System/Library/Fonts/Helvetica.ttc";
-    const HELVETICA_NEUE: &str = "/System/Library/Fonts/HelveticaNeue.ttc";
-    const ARIAL_UNICODE: &str = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
-
-    let hiragino = macos_font_by_postscript_name(HIRAGINO, hiragino_name, None, None)
-        .or_else(|| macos_font(HIRAGINO, hiragino_index));
-    let sfns = macos_font_by_postscript_name(SFNS, ".SFNS-Regular", Some(sfns_weight), Some(17.0));
-    let mut fonts = Vec::new();
-
-    // egui cannot rasterize the private variable PingFang UI faces reliably.
-    // Hiragino covers both Latin and CJK, keeping mixed text on one baseline.
-    push_unique_font(&mut fonts, hiragino);
-    push_unique_font(&mut fonts, sfns);
-    push_unique_font(&mut fonts, macos_font(HELVETICA, helvetica_index));
-    push_unique_font(&mut fonts, macos_font(HELVETICA_NEUE, helvetica_index));
-    push_unique_font(&mut fonts, macos_font(ARIAL_UNICODE, 0));
-    fonts
-}
-
-#[cfg(target_os = "macos")]
-fn regular_system_fonts() -> Vec<SystemFont> {
-    macos_system_fonts(400.0, "HiraginoSansGB-W3", 0, 0)
-}
-
-#[cfg(target_os = "macos")]
-fn bold_system_fonts() -> Vec<SystemFont> {
-    macos_system_fonts(700.0, "HiraginoSansGB-W6", 2, 1)
-}
-
+#[cfg(not(target_os = "macos"))]
 fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiError> {
     let regular_family = FontFamily::Name("cefdetector-regular".into());
     let bold_family = FontFamily::Name("cefdetector-bold".into());
@@ -909,6 +918,7 @@ fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiE
     Ok((regular_family, bold_family))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn add_system_fonts(
     definitions: &mut FontDefinitions,
     mapped_files: &mut HashMap<PathBuf, &'static [u8]>,
@@ -940,12 +950,6 @@ fn add_system_fonts(
 
         let mut data = FontData::from_static(bytes);
         data.index = font.index;
-        if let Some(weight) = font.weight {
-            data.tweak.coords.push("wght", weight);
-        }
-        if let Some(optical_size) = font.optical_size {
-            data.tweak.coords.push("opsz", optical_size);
-        }
         definitions.font_data.insert(name.clone(), Arc::new(data));
         names.push(name);
     }
@@ -1460,8 +1464,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use super::{bold_system_fonts, regular_system_fonts};
     use super::{format_size, scroll_from_thumb_drag};
 
     #[test]
@@ -1475,20 +1477,5 @@ mod tests {
     fn scrollbar_drag_uses_total_pointer_displacement() {
         assert_eq!(scroll_from_thumb_drag(20.0, 30.0, 200.0, 100.0), 80.0);
         assert_eq!(scroll_from_thumb_drag(20.0, -30.0, 200.0, 100.0), 0.0);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_primary_font_has_distinct_regular_and_bold_faces() {
-        let regular = regular_system_fonts();
-        let bold = bold_system_fonts();
-        let regular = regular.first().expect("a macOS system font");
-        let bold = bold.first().expect("a bold macOS system font");
-
-        assert_eq!(regular.path, bold.path);
-        assert_ne!(
-            (regular.index, regular.weight, regular.optical_size),
-            (bold.index, bold.weight, bold.optical_size)
-        );
     }
 }
