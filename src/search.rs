@@ -847,6 +847,7 @@ where
 mod tests {
     use std::fs;
     use std::io::Cursor;
+    #[cfg(target_os = "macos")]
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 

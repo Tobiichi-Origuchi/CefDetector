@@ -207,7 +207,7 @@ jobs:
           if [[ "${{ matrix.backend }}" == "spotlight" ]]; then
             /usr/bin/mdfind -0 'kMDItemContentTypeTree == "com.apple.application-bundle"' >/dev/null
             target/release/cefdetector --json >/tmp/cefdetector-spotlight.json
-            plutil -lint /tmp/cefdetector-spotlight.json
+            jq empty /tmp/cefdetector-spotlight.json
           fi
 
       - name: Test GUI startup
