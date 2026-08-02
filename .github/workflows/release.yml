@@ -124,15 +124,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Validate ignore backend
+      - name: Validate merged backends
         run: |
           cargo test --locked --all-targets
           cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Validate plocate backend
-        run: |
-          cargo test --locked --no-default-features --features gui,plocate --all-targets
-          cargo clippy --locked --no-default-features --features gui,plocate --all-targets -- -D warnings
+          cargo check --locked --no-default-features --all-targets
+          cargo check --locked --no-default-features --features gui --all-targets
+          cargo check --locked --no-default-features --features index --all-targets
 
       - name: Build Linux archives
         env:
@@ -142,43 +140,30 @@ jobs:
       - name: Test packaged GUI binaries
         timeout-minutes: 2
         run: |
-          set -euo pipefail
-          for backend in ignore plocate; do
-            xvfb-run --auto-servernum env \
-              CEFDETECTOR_GUI_SMOKE_TEST=1 \
-              LIBGL_ALWAYS_SOFTWARE=1 \
-              "target/release/package-binaries/cefdetector-${backend}"
-          done
+          xvfb-run --auto-servernum env \
+            CEFDETECTOR_GUI_SMOKE_TEST=1 \
+            LIBGL_ALWAYS_SOFTWARE=1 \
+            target/release/package-binaries/cefdetector
 
       - name: Inspect Linux archives
         run: |
           set -euo pipefail
-          for archive in dist/cefdetector-*-linux-x86_64-*.tar.gz; do
-            tar -tzf "${archive}" >/dev/null
-          done
+          tar -tzf dist/cefdetector-*-linux-x86_64.tar.gz >/dev/null
           ls -lh dist
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: release-linux-x86_64
-          path: dist/cefdetector-*-linux-x86_64-*.tar.gz
+          path: dist/cefdetector-*-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7
 
   windows:
-    name: Windows package (${{ matrix.backend }})
+    name: Windows package
     needs: metadata
     runs-on: windows-2025
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: ignore
-            cargo_args: ""
-          - backend: everything
-            cargo_args: --no-default-features --features gui,everything
 
     steps:
       - name: Check out release tag
@@ -195,15 +180,18 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: release-${{ matrix.backend }}
+          key: release-windows
 
       - name: Validate release source
         run: |
-          cargo test --locked ${{ matrix.cargo_args }} --all-targets
-          cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo check --locked --no-default-features --all-targets
+          cargo check --locked --no-default-features --features gui --all-targets
+          cargo check --locked --no-default-features --features index --all-targets
 
       - name: Build release binary
-        run: cargo build --locked --release ${{ matrix.cargo_args }}
+        run: cargo build --locked --release
 
       - name: Install Mesa software renderer
         uses: ssciwr/setup-mesa-dist-win@2dfeaebfa514f74c2b8cd8d27108c31486d33e72 # v3.0.0
@@ -229,7 +217,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $packageName = "cefdetector-$env:RELEASE_VERSION-windows-x86_64-${{ matrix.backend }}"
+          $packageName = "cefdetector-$env:RELEASE_VERSION-windows-x86_64"
           $stagingDirectory = Join-Path $env:RUNNER_TEMP $packageName
           New-Item -ItemType Directory -Force $stagingDirectory | Out-Null
           Copy-Item -LiteralPath target/release/cefdetector.exe, README.md, LICENSE `
@@ -241,7 +229,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: release-windows-x86_64-${{ matrix.backend }}
+          name: release-windows-x86_64
           path: dist/*.zip
           if-no-files-found: error
           retention-days: 7
@@ -281,8 +269,9 @@ jobs:
         run: |
           cargo test --locked --all-targets
           cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked --no-default-features --features gui,spotlight --all-targets
-          cargo clippy --locked --no-default-features --features gui,spotlight --all-targets -- -D warnings
+          cargo check --locked --no-default-features --all-targets
+          cargo check --locked --no-default-features --features gui --all-targets
+          cargo check --locked --no-default-features --features index --all-targets
 
       - name: Build ad-hoc signed app bundles
         env:
@@ -291,32 +280,34 @@ jobs:
 
       - name: Test packaged applications
         timeout-minutes: 4
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
-          for archive in dist/cefdetector-*-macos-aarch64-*.zip; do
-            unpacked="${RUNNER_TEMP}/smoke-$(basename "${archive}" .zip)"
-            ditto -x -k "${archive}" "${unpacked}"
-            CEFDETECTOR_GUI_SMOKE_TEST=1 "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector"
-            codesign --verify --deep --strict --verbose=2 "${unpacked}/CefDetector.app"
-            codesign_description="$(codesign --display --verbose=4 "${unpacked}/CefDetector.app" 2>&1)"
-            printf '%s\n' "${codesign_description}"
-            grep -Fxq 'Signature=adhoc' <<<"${codesign_description}"
-            file_description="$(file "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector")"
-            printf '%s\n' "${file_description}"
-            grep -Fq 'arm64' <<<"${file_description}"
-            lipo_description="$(lipo -info "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector")"
-            printf '%s\n' "${lipo_description}"
-            if grep -Fq 'x86_64' <<<"${lipo_description}"; then
-              echo "Packaged binary contains a forbidden x86_64 slice" >&2
-              exit 1
-            fi
-          done
+          archive="dist/cefdetector-${RELEASE_VERSION}-macos-aarch64.zip"
+          test -f "${archive}"
+          unpacked="${RUNNER_TEMP}/smoke-$(basename "${archive}" .zip)"
+          ditto -x -k "${archive}" "${unpacked}"
+          CEFDETECTOR_GUI_SMOKE_TEST=1 "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector"
+          codesign --verify --deep --strict --verbose=2 "${unpacked}/CefDetector.app"
+          codesign_description="$(codesign --display --verbose=4 "${unpacked}/CefDetector.app" 2>&1)"
+          printf '%s\n' "${codesign_description}"
+          grep -Fxq 'Signature=adhoc' <<<"${codesign_description}"
+          file_description="$(file "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector")"
+          printf '%s\n' "${file_description}"
+          grep -Fq 'arm64' <<<"${file_description}"
+          lipo_description="$(lipo -info "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector")"
+          printf '%s\n' "${lipo_description}"
+          if grep -Fq 'x86_64' <<<"${lipo_description}"; then
+            echo "Packaged binary contains a forbidden x86_64 slice" >&2
+            exit 1
+          fi
 
       - name: Upload macOS packages
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: release-macos-aarch64
-          path: dist/cefdetector-*-macos-aarch64-*.zip
+          path: dist/cefdetector-*-macos-aarch64.zip
           if-no-files-found: error
           retention-days: 7
 

@@ -106,8 +106,19 @@ impl CandidateSource for PlocateCandidateSource {
 mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::path::PathBuf;
+    use std::process::{ExitStatus, Output};
 
-    use super::parse_paths;
+    use super::{no_matches, parse_paths};
+
+    fn failed_output(stderr: &[u8]) -> Output {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
 
     #[test]
     fn nul_output_preserves_newlines_and_non_utf8_paths() {
@@ -126,5 +137,17 @@ mod tests {
     fn nul_output_ignores_empty_records() {
         let paths: Vec<_> = parse_paths(b"\0/opt/libcef.so\0\0").collect();
         assert_eq!(paths, [PathBuf::from("/opt/libcef.so")]);
+    }
+
+    #[test]
+    fn empty_status_one_is_treated_as_no_matches() {
+        assert!(no_matches(&failed_output(b"\n")));
+    }
+
+    #[test]
+    fn database_permission_error_is_not_treated_as_no_matches() {
+        assert!(!no_matches(&failed_output(
+            b"/var/lib/plocate/plocate.db: Permission denied\n"
+        )));
     }
 }

@@ -9,8 +9,7 @@ edition = "2024"
 rust-version = "1.92.0"
 
 [features]
-# Search backends are compile-time selections; backend.rs enforces exactly one.
-default = ["gui", "ignore"]
+default = ["gui", "index"]
 gui = [
     "dep:backhand",
     "dep:egui",
@@ -25,19 +24,18 @@ gui = [
     "windows-sys/Win32_UI_Shell",
     "windows-sys/Win32_UI_WindowsAndMessaging",
 ]
-ignore = ["dep:ignore"]
-plocate = []
-everything = [
+# Selects plocate on Linux, Everything on Windows, and Spotlight on macOS.
+# The always-compiled ignore backend remains the runtime fallback.
+index = [
     "windows-sys/Win32_Graphics_Gdi",
     "windows-sys/Win32_System_DataExchange",
     "windows-sys/Win32_System_LibraryLoader",
     "windows-sys/Win32_UI_WindowsAndMessaging",
 ]
-spotlight = []
 
 [dependencies]
 pelite = { version = "0.10.0", optional = true }
-ignore = { version = "0.4.31", optional = true }
+ignore = "0.4.31"
 memchr = "2.8.3"
 image = { version = "0.25.10", optional = true, default-features = false, features = ["png", "ico", "webp"] }
 egui = { version = "0.35.0", optional = true, default-features = false }

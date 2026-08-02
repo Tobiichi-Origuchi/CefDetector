@@ -19,17 +19,9 @@ env:
 
 jobs:
   linux:
-    name: Linux (${{ matrix.backend }})
+    name: Linux
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: ignore
-            cargo_args: ""
-          - backend: plocate
-            cargo_args: --no-default-features --features gui,plocate
 
     steps:
       - name: Check out repository
@@ -58,24 +50,26 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: ${{ matrix.backend }}
+          key: linux
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Check formatting
-        if: matrix.backend == 'ignore'
         run: cargo fmt --all -- --check
 
       - name: Run tests
-        run: cargo test --locked ${{ matrix.cargo_args }} --all-targets
+        run: cargo test --locked --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Check CLI-only build
-        run: cargo check --locked --no-default-features --features ${{ matrix.backend }} --all-targets
+      - name: Check optional feature combinations
+        run: |
+          cargo check --locked --no-default-features --all-targets
+          cargo check --locked --no-default-features --features gui --all-targets
+          cargo check --locked --no-default-features --features index --all-targets
 
       - name: Build release binary
-        run: cargo build --locked --release ${{ matrix.cargo_args }}
+        run: cargo build --locked --release
 
       - name: Test GUI startup
         timeout-minutes: 2
@@ -86,17 +80,9 @@ jobs:
             target/release/cefdetector
 
   windows:
-    name: Windows (${{ matrix.backend }})
+    name: Windows
     runs-on: windows-2025
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: ignore
-            cargo_args: ""
-          - backend: everything
-            cargo_args: --no-default-features --features gui,everything
 
     steps:
       - name: Check out repository
@@ -112,20 +98,23 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: ${{ matrix.backend }}
+          key: windows
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Run tests
-        run: cargo test --locked ${{ matrix.cargo_args }} --all-targets
+        run: cargo test --locked --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Check CLI-only build
-        run: cargo check --locked --no-default-features --features ${{ matrix.backend }} --all-targets
+      - name: Check optional feature combinations
+        run: |
+          cargo check --locked --no-default-features --all-targets
+          cargo check --locked --no-default-features --features gui --all-targets
+          cargo check --locked --no-default-features --features index --all-targets
 
       - name: Build release binary
-        run: cargo build --locked --release ${{ matrix.cargo_args }}
+        run: cargo build --locked --release
 
       - name: Install Mesa software renderer
         uses: ssciwr/setup-mesa-dist-win@2dfeaebfa514f74c2b8cd8d27108c31486d33e72 # v3.0.0
@@ -151,28 +140,20 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -LiteralPath target/release/cefdetector.exe `
-            -Destination "dist/cefdetector-windows-x86_64-${{ matrix.backend }}.exe"
+            -Destination "dist/cefdetector-windows-x86_64.exe"
 
       - name: Upload executable
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: cefdetector-windows-x86_64-${{ matrix.backend }}
+          name: cefdetector-windows-x86_64
           path: dist/*.exe
           if-no-files-found: error
           retention-days: 7
 
   macos:
-    name: macOS 15 arm64 (${{ matrix.backend }})
+    name: macOS 15 arm64
     runs-on: macos-15
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - backend: ignore
-            cargo_args: ""
-          - backend: spotlight
-            cargo_args: --no-default-features --features gui,spotlight
 
     steps:
       - name: Check out repository
@@ -196,30 +177,31 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: macos-15-${{ matrix.backend }}
+          key: macos-15
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Run tests
-        run: cargo test --locked ${{ matrix.cargo_args }} --all-targets
+        run: cargo test --locked --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --locked ${{ matrix.cargo_args }} --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Check CLI-only build
-        run: cargo check --locked --no-default-features --features ${{ matrix.backend }} --all-targets
+      - name: Check optional feature combinations
+        run: |
+          cargo check --locked --no-default-features --all-targets
+          cargo check --locked --no-default-features --features gui --all-targets
+          cargo check --locked --no-default-features --features index --all-targets
 
       - name: Build release binary
-        run: cargo build --locked --release ${{ matrix.cargo_args }}
+        run: cargo build --locked --release
 
       - name: Test CLI and Spotlight command
         run: |
           target/release/cefdetector --version
           target/release/cefdetector --help
-          if [[ "${{ matrix.backend }}" == "spotlight" ]]; then
-            /usr/bin/mdfind -0 'kMDItemContentTypeTree == "com.apple.application-bundle"' >/dev/null
-            target/release/cefdetector --json >/tmp/cefdetector-spotlight.json
-            jq empty /tmp/cefdetector-spotlight.json
-          fi
+          /usr/bin/mdfind -0 'kMDItemContentTypeTree == "com.apple.application-bundle"' >/dev/null
+          target/release/cefdetector --json >/tmp/cefdetector.json
+          jq empty /tmp/cefdetector.json
 
       - name: Test GUI startup
         timeout-minutes: 2

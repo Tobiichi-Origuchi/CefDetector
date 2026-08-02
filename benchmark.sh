@@ -274,11 +274,11 @@ bench_build_binaries() {
     mkdir -p -- "${BENCH_ARTIFACT_DIR}"
 
     printf 'Building locked release binary for the ignore backend...\n'
-    cargo build --locked --release
+    cargo build --locked --release --no-default-features --features gui
     install -m755 target/release/cefdetector "${BENCH_IGNORE_BINARY}"
 
     printf 'Building locked release binary for the plocate backend...\n'
-    cargo build --locked --release --no-default-features --features gui,plocate
+    cargo build --locked --release --no-default-features --features gui,index
     install -m755 target/release/cefdetector "${BENCH_PLOCATE_BINARY}"
 }
 

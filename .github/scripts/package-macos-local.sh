@@ -12,20 +12,14 @@ output_dir="${PACKAGE_OUTPUT_DIR:-${project_dir}/target/local-macos-packages}"
 architecture="$(uname -m)"
 mkdir -p "${output_dir}"
 
-for backend in ignore spotlight; do
-  if [[ "${backend}" == "spotlight" ]]; then
-    cargo build --locked --release --no-default-features --features gui,spotlight
-  else
-    cargo build --locked --release
-  fi
-  bundle="${output_dir}/CefDetector-${backend}.app"
-  rm -rf "${bundle}"
-  mkdir -p "${bundle}/Contents/MacOS" "${bundle}/Contents/Resources"
-  sed "s/__VERSION__/${version}/g" "${project_dir}/packaging/macos/Info.plist" > "${bundle}/Contents/Info.plist"
-  cp "${project_dir}/target/release/cefdetector" "${bundle}/Contents/MacOS/cefdetector"
-  cp "${project_dir}/icons/icon.icns" "${bundle}/Contents/Resources/icon.icns"
-  chmod 755 "${bundle}/Contents/MacOS/cefdetector"
-  codesign --force --deep --sign - "${bundle}"
-  codesign --verify --deep --strict --verbose=2 "${bundle}"
-  echo "Built local ${architecture} bundle: ${bundle}"
-done
+cargo build --locked --release
+bundle="${output_dir}/CefDetector.app"
+rm -rf "${bundle}"
+mkdir -p "${bundle}/Contents/MacOS" "${bundle}/Contents/Resources"
+sed "s/__VERSION__/${version}/g" "${project_dir}/packaging/macos/Info.plist" > "${bundle}/Contents/Info.plist"
+cp "${project_dir}/target/release/cefdetector" "${bundle}/Contents/MacOS/cefdetector"
+cp "${project_dir}/icons/icon.icns" "${bundle}/Contents/Resources/icon.icns"
+chmod 755 "${bundle}/Contents/MacOS/cefdetector"
+codesign --force --deep --sign - "${bundle}"
+codesign --verify --deep --strict --verbose=2 "${bundle}"
+echo "Built local ${architecture} bundle: ${bundle}"

@@ -27,15 +27,12 @@ elif (($# != 1)); then
 fi
 
 AUR_VERSION=${AUR_TAG#v}
-AUR_DEFAULT_PACKAGE_FILE="cefdetector-${AUR_VERSION}-linux-x86_64-ignore.tar.gz"
-AUR_PLOCATE_PACKAGE_FILE="cefdetector-${AUR_VERSION}-linux-x86_64-plocate.tar.gz"
+AUR_PACKAGE_FILE="cefdetector-${AUR_VERSION}-linux-x86_64.tar.gz"
 
-for package_file in "${AUR_DEFAULT_PACKAGE_FILE}" "${AUR_PLOCATE_PACKAGE_FILE}"; do
-    if [[ ! -f "${AUR_ASSET_DIR}/${package_file}" ]]; then
-        echo "Release package not found: ${AUR_ASSET_DIR}/${package_file}" >&2
-        exit 1
-    fi
-done
+if [[ ! -f "${AUR_ASSET_DIR}/${AUR_PACKAGE_FILE}" ]]; then
+    echo "Release package not found: ${AUR_ASSET_DIR}/${AUR_PACKAGE_FILE}" >&2
+    exit 1
+fi
 
 if [[ -n "${AUR_RENDER_DIR}" ]]; then
     mkdir -p -- "${AUR_RENDER_DIR}"
@@ -87,11 +84,15 @@ aur_render_package() {
     local package_url="https://github.com/${AUR_GITHUB_REPOSITORY}/releases/download/${AUR_TAG}/${package_file}"
     local package_sha256
     local pkgbuild_depends="'fontconfig' 'libglvnd' 'xdg-utils'"
+    local pkgbuild_optdepends="optdepends=('plocate: use the indexed search backend')"
     local srcinfo_dependencies=$'\tdepends = fontconfig\n\tdepends = libglvnd\n\tdepends = xdg-utils'
+    local srcinfo_optdepends=$'\toptdepends = plocate: use the indexed search backend'
 
     if [[ "${requires_plocate}" == true ]]; then
         pkgbuild_depends+=" 'plocate'"
+        pkgbuild_optdepends=""
         srcinfo_dependencies+=$'\n\tdepends = plocate'
+        srcinfo_optdepends=""
     fi
 
     package_sha256=$(sha256sum "${local_package}" | awk '{print $1}')
@@ -105,6 +106,7 @@ arch=('x86_64')
 url="https://github.com/${AUR_GITHUB_REPOSITORY}"
 license=('MIT')
 depends=(${pkgbuild_depends})
+${pkgbuild_optdepends}
 provides=("cefdetector=\${pkgver}")
 conflicts=('cefdetector')
 source=("\${pkgname}-\${pkgver}.tar.gz::${package_url}")
@@ -125,6 +127,7 @@ pkgbase = ${package_name}
 	arch = x86_64
 	license = MIT
 ${srcinfo_dependencies}
+${srcinfo_optdepends}
 	provides = cefdetector=${AUR_VERSION}
 	conflicts = cefdetector
 	noextract = ${package_name}-${AUR_VERSION}.tar.gz
@@ -181,11 +184,11 @@ aur_publish_package() {
 aur_publish_package \
     "cefdetector-bin" \
     "Check how many CEFs are on your Linux." \
-    "${AUR_DEFAULT_PACKAGE_FILE}" \
+    "${AUR_PACKAGE_FILE}" \
     false
 
 aur_publish_package \
     "cefdetector-plocate-bin" \
     "Check how many CEFs are on your Linux using the plocate index." \
-    "${AUR_PLOCATE_PACKAGE_FILE}" \
+    "${AUR_PACKAGE_FILE}" \
     true

@@ -84,7 +84,15 @@ function Build-BenchmarkBinaries {
     New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
 
     Write-Host "Building locked release binary for the ignore backend..."
-    Invoke-CargoBuild -Arguments @("build", "--locked", "--release") `
+    Invoke-CargoBuild `
+        -Arguments @(
+            "build",
+            "--locked",
+            "--release",
+            "--no-default-features",
+            "--features",
+            "gui"
+        ) `
         -Destination $ignoreBinary
 
     Write-Host "Building locked release binary for the Everything backend..."
@@ -95,7 +103,7 @@ function Build-BenchmarkBinaries {
             "--release",
             "--no-default-features",
             "--features",
-            "gui,everything"
+            "gui,index"
         ) `
         -Destination $everythingBinary
 }

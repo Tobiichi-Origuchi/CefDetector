@@ -1,33 +1,33 @@
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 use std::io;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 use std::process::Command;
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 use std::process::Output;
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 use std::process::Stdio;
 
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 use super::backend::{ScanCandidate, classify_candidate_name};
 
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 const MDFIND: &str = "/usr/bin/mdfind";
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 const APPLICATION_QUERY: &str = r#"kMDItemContentTypeTree == "com.apple.application-bundle""#;
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 const FILE_QUERY: &str = r#"kMDItemFSName == "Chromium Embedded Framework" || kMDItemFSName == "Electron Framework" || kMDItemFSName == "libcef*"c || kMDItemFSName == "libnode*"c || kMDItemFSName == "*_100_*.pak"c"#;
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 const MAX_MDFIND_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 const MAX_CANDIDATES: usize = 250_000;
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 const MDFIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,6 +91,7 @@ fn contained_file(root: &Path, path: &Path) -> bool {
     fs::canonicalize(path).is_ok_and(|path| path.is_file() && path.starts_with(root))
 }
 
+#[cfg(any(test, feature = "gui"))]
 pub(crate) fn bundle_icon_path(root: &Path) -> Option<PathBuf> {
     let icon = inspect_bundle(root).icon_file?;
     let file_name = Path::new(&icon).file_name()?;
@@ -101,7 +102,7 @@ pub(crate) fn bundle_icon_path(root: &Path) -> Option<PathBuf> {
     contained_file(root, &path).then_some(path)
 }
 
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 fn parse_nul_paths(bytes: Vec<u8>) -> io::Result<Vec<PathBuf>> {
     if bytes.len() > MAX_MDFIND_BYTES {
         return Err(io::Error::other(
@@ -123,7 +124,7 @@ fn parse_nul_paths(bytes: Vec<u8>) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-#[cfg(any(test, feature = "spotlight"))]
+#[cfg(any(test, feature = "index"))]
 fn checked_output(output: Output) -> io::Result<Vec<PathBuf>> {
     if output.status.success() {
         return parse_nul_paths(output.stdout);
@@ -137,7 +138,7 @@ fn checked_output(output: Output) -> io::Result<Vec<PathBuf>> {
     }))
 }
 
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 fn query(expression: &str) -> io::Result<Vec<PathBuf>> {
     use std::io::Read as _;
 
@@ -214,7 +215,7 @@ pub(super) fn is_platform_excluded(path: &Path) -> bool {
         })
 }
 
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 fn scan_bundle(root: &Path, candidates: &mut BTreeSet<(PathBuf, super::backend::CandidateKind)>) {
     let mut pending = [
         "Contents/Frameworks",
@@ -248,11 +249,16 @@ fn scan_bundle(root: &Path, candidates: &mut BTreeSet<(PathBuf, super::backend::
     }
 }
 
-#[cfg(feature = "spotlight")]
+#[cfg(feature = "index")]
 pub(super) fn spotlight_candidates() -> io::Result<Vec<ScanCandidate>> {
     let mut found = BTreeSet::new();
     let mut roots = BTreeSet::new();
-    for path in query(APPLICATION_QUERY)? {
+    // Complete both index operations before walking application bundles. This
+    // makes a disabled or unhealthy Spotlight service fail before any fallback-
+    // eligible filesystem work is performed, without adding a probe query.
+    let application_paths = query(APPLICATION_QUERY)?;
+    let file_paths = query(FILE_QUERY)?;
+    for path in application_paths {
         if path.is_dir() && !is_platform_excluded(&path) {
             roots.insert(outermost_bundle(&path).unwrap_or(path));
         }
@@ -260,7 +266,7 @@ pub(super) fn spotlight_candidates() -> io::Result<Vec<ScanCandidate>> {
     for root in &roots {
         scan_bundle(root, &mut found);
     }
-    for path in query(FILE_QUERY)? {
+    for path in file_paths {
         if path.is_file()
             && !is_platform_excluded(&path)
             && let Some(name) = path.file_name()

@@ -110,37 +110,24 @@ package_stage_common_files() {
         "${stage_dir}/usr/share/doc/cefdetector/README.md"
 }
 
-package_backend() {
-    local backend=$1
-    local stage_dir="${PACKAGE_WORK_DIR}/${backend}"
+package_archive() {
+    local stage_dir="${PACKAGE_WORK_DIR}/package"
     local archive_name
     local archive_path
     local temporary_archive
-    local -a cargo_arguments=(--locked --release)
 
-    case "${backend}" in
-        ignore)
-            ;;
-        plocate)
-            cargo_arguments+=(--no-default-features --features "gui,plocate")
-            ;;
-        *)
-            package_fail "unknown Linux backend: ${backend}"
-            ;;
-    esac
-
-    printf 'Building the %s backend...\n' "${backend}"
-    cargo build "${cargo_arguments[@]}"
+    printf 'Building the merged Linux backends...\n'
+    cargo build --locked --release
 
     install -Dm755 \
         target/release/cefdetector \
-        "${PACKAGE_BINARY_DIR}/cefdetector-${backend}"
+        "${PACKAGE_BINARY_DIR}/cefdetector"
     install -Dm755 \
         target/release/cefdetector \
         "${stage_dir}/usr/bin/cefdetector"
     package_stage_common_files "${stage_dir}"
 
-    archive_name="cefdetector-${PACKAGE_VERSION}-linux-x86_64-${backend}.tar.gz"
+    archive_name="cefdetector-${PACKAGE_VERSION}-linux-x86_64.tar.gz"
     archive_path="${PACKAGE_OUTPUT_DIR}/${archive_name}"
     temporary_archive="${archive_path}.tmp"
     PACKAGE_TEMP_ARCHIVES+=("${temporary_archive}")
@@ -162,5 +149,4 @@ package_backend() {
 }
 
 umask 022
-package_backend ignore
-package_backend plocate
+package_archive

@@ -32,7 +32,7 @@ Options:
   -h, --help          Show this help
 
 The script requires a clean working tree, updates Cargo.toml and Cargo.lock,
-checks both Linux search backends, creates an annotated release tag, and
+checks index-enabled and index-disabled Linux builds, creates a release tag, and
 atomically pushes the current branch and tag.
 EOF
 }
@@ -147,7 +147,7 @@ if [[ "${DRY_RUN}" == true ]]; then
   else
     printf '  Push:    branch and tag to %s atomically\n' "${REMOTE}"
   fi
-  printf '  Checks:  format, tests, Clippy, and release builds for ignore and plocate\n'
+  printf '  Checks:  format, tests, Clippy, release, index-disabled, and CLI-only builds\n'
   exit 0
 fi
 
@@ -208,10 +208,10 @@ printf 'Running release checks...\n'
 cargo fmt --all -- --check
 cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --no-default-features --features gui,plocate --all-targets
-cargo clippy --locked --no-default-features --features gui,plocate --all-targets -- -D warnings
+cargo check --locked --no-default-features --all-targets
+cargo check --locked --no-default-features --features gui --all-targets
+cargo check --locked --no-default-features --features index --all-targets
 cargo build --locked --release
-cargo build --locked --release --no-default-features --features gui,plocate
 git diff --check
 
 if [[ "${CURRENT_VERSION}" != "${RAW_VERSION}" ]]; then
