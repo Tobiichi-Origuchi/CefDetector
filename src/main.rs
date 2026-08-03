@@ -10,14 +10,17 @@ pub mod package_manager;
 pub mod search;
 
 fn main() {
-    cli::handle_cli();
+    let launch_options = cli::handle_cli();
 
     #[cfg(feature = "gui")]
-    if let Err(error) = gui::run() {
+    if let Err(error) = gui::run(launch_options.system_font) {
         eprintln!("Failed to start the GUI: {error}");
         std::process::exit(1);
     }
 
     #[cfg(not(feature = "gui"))]
-    cli::print_help();
+    {
+        let _ = launch_options;
+        cli::print_help();
+    }
 }

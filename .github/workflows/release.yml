@@ -220,8 +220,14 @@ jobs:
           $packageName = "cefdetector-$env:RELEASE_VERSION-windows-x86_64"
           $stagingDirectory = Join-Path $env:RUNNER_TEMP $packageName
           New-Item -ItemType Directory -Force $stagingDirectory | Out-Null
-          Copy-Item -LiteralPath target/release/cefdetector.exe, README.md, LICENSE `
-            -Destination $stagingDirectory
+          $packageFiles = @(
+            "target/release/cefdetector.exe"
+            "README.md"
+            "LICENSE"
+            "fonts/OFL-Inter.txt"
+            "fonts/NOTICE.txt"
+          )
+          Copy-Item -LiteralPath $packageFiles -Destination $stagingDirectory
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path $stagingDirectory `
             -DestinationPath "dist/$packageName.zip"

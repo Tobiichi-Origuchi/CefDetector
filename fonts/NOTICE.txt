@@ -1,0 +1,7 @@
+The card font subsets are derived from Inter, obtained from the official
+Google Fonts repository. They are renamed modified versions distributed
+under the SIL Open Font License 1.1 in OFL-Inter.txt.
+
+The title font subset is derived from the user-supplied HYWenHei 85W font.
+Its embedded metadata identifies Beijing HANYI KEYIN Information Technology
+Co. as the copyright holder and HANYI as the trademark owner.

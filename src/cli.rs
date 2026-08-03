@@ -5,6 +5,12 @@ use crate::search::core_search;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Clone, Copy, Default)]
+pub struct LaunchOptions {
+    #[cfg(feature = "gui")]
+    pub system_font: bool,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum OutputFormat {
     Toml,
@@ -24,6 +30,8 @@ pub fn print_help() {
     println!("  -J, --json       Output results in JSON format");
     println!("  -C, --csv        Output results in CSV format");
     println!("  -O, --output     Output results to the specified file path instead of stdout");
+    #[cfg(feature = "gui")]
+    println!("      --system-font Use platform system fonts instead of embedded fonts");
 }
 
 fn push_json_string(output: &mut String, value: &str) {
@@ -70,8 +78,12 @@ fn format_json(results: &[AppInfo]) -> String {
     output
 }
 
-pub fn handle_cli() {
+pub fn handle_cli() -> LaunchOptions {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(feature = "gui")]
+    let mut launch_options = LaunchOptions::default();
+    #[cfg(not(feature = "gui"))]
+    let launch_options = LaunchOptions::default();
     let mut show_help = false;
     let mut show_version = false;
     let mut output_format: Option<OutputFormat> = None;
@@ -85,6 +97,8 @@ pub fn handle_cli() {
             "--toml" | "-T" => output_format = Some(OutputFormat::Toml),
             "--json" | "-J" => output_format = Some(OutputFormat::Json),
             "--csv" | "-C" => output_format = Some(OutputFormat::Csv),
+            #[cfg(feature = "gui")]
+            "--system-font" => launch_options.system_font = true,
             "--output" | "-O" => {
                 if i + 1 < args.len() {
                     output_path = Some(args[i + 1].clone());
@@ -160,6 +174,8 @@ pub fn handle_cli() {
         }
         std::process::exit(0);
     }
+
+    launch_options
 }
 
 #[cfg(test)]

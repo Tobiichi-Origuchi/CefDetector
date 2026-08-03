@@ -11,13 +11,11 @@ use std::cell::RefCell;
 #[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 
-#[cfg(not(target_os = "macos"))]
 use egui::text::TextWrapping;
 use egui::{
     Color32, ColorImage, CursorIcon, Id, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2, pos2, vec2,
 };
-#[cfg(not(target_os = "macos"))]
 use egui::{FontData, FontDefinitions, FontFamily, FontId};
 use egui_glow::egui_winit::winit;
 use glutin::context::PossiblyCurrentContext;
@@ -79,10 +77,50 @@ struct AppItem {
     raw_size: i32,
 }
 
+#[derive(Clone, Copy)]
+enum TextRole {
+    Title,
+    CardRegular,
+    CardBold,
+    Footer,
+}
+
 #[cfg(target_os = "macos")]
-type PreparedText = macos_text::NativeText;
-#[cfg(not(target_os = "macos"))]
-type PreparedText = Arc<egui::Galley>;
+impl TextRole {
+    fn is_bold(self) -> bool {
+        matches!(self, Self::Title | Self::CardBold)
+    }
+}
+
+struct EguiFonts {
+    title: FontFamily,
+    card_regular: FontFamily,
+    card_bold: FontFamily,
+    footer: FontFamily,
+}
+
+impl EguiFonts {
+    fn family(&self, role: TextRole) -> FontFamily {
+        match role {
+            TextRole::Title => self.title.clone(),
+            TextRole::CardRegular => self.card_regular.clone(),
+            TextRole::CardBold => self.card_bold.clone(),
+            TextRole::Footer => self.footer.clone(),
+        }
+    }
+}
+
+enum TextRenderer {
+    Egui(EguiFonts),
+    #[cfg(target_os = "macos")]
+    CoreText(RefCell<macos_text::CoreTextRenderer>),
+}
+
+enum PreparedText {
+    Egui(Arc<egui::Galley>),
+    #[cfg(target_os = "macos")]
+    CoreText(macos_text::NativeText),
+}
 
 enum SearchMessage {
     Batch {
@@ -108,18 +146,12 @@ struct Frontend {
     background: TextureHandle,
     default_icon: TextureHandle,
     decoded_icons: HashMap<u64, TextureHandle>,
-    #[cfg(target_os = "macos")]
-    text_renderer: RefCell<macos_text::CoreTextRenderer>,
-    #[cfg(not(target_os = "macos"))]
-    regular_font: FontFamily,
-    #[cfg(not(target_os = "macos"))]
-    bold_font: FontFamily,
+    text_renderer: TextRenderer,
 }
 
 impl Frontend {
-    fn new(ctx: &egui::Context) -> Result<Self, GuiError> {
-        #[cfg(not(target_os = "macos"))]
-        let (regular_font, bold_font) = configure_fonts(ctx)?;
+    fn new(ctx: &egui::Context, use_system_fonts: bool) -> Result<Self, GuiError> {
+        let text_renderer = configure_text_renderer(ctx, use_system_fonts)?;
 
         let background = load_texture(
             ctx,
@@ -148,12 +180,7 @@ impl Frontend {
             background,
             default_icon,
             decoded_icons: HashMap::new(),
-            #[cfg(target_os = "macos")]
-            text_renderer: RefCell::new(macos_text::CoreTextRenderer::new()),
-            #[cfg(not(target_os = "macos"))]
-            regular_font,
-            #[cfg(not(target_os = "macos"))]
-            bold_font,
+            text_renderer,
         })
     }
 
@@ -244,7 +271,7 @@ impl Frontend {
             &painter,
             &self.search_status,
             18.0,
-            true,
+            TextRole::Title,
             status_color,
             None,
         );
@@ -385,13 +412,27 @@ impl Frontend {
             painter,
             &item.filename,
             11.0,
-            true,
+            TextRole::CardBold,
             running_color,
             Some(76.0),
         );
-        let app_type = self.layout_text(painter, &item.app_type, 10.0, false, running_color, None);
+        let app_type = self.layout_text(
+            painter,
+            &item.app_type,
+            10.0,
+            TextRole::CardRegular,
+            running_color,
+            None,
+        );
         let size_color = Color32::from_black_alpha(214);
-        let size = self.layout_text(painter, &item.size_str, 9.0, false, size_color, None);
+        let size = self.layout_text(
+            painter,
+            &item.size_str,
+            9.0,
+            TextRole::CardRegular,
+            size_color,
+            None,
+        );
         let filename_size = prepared_text_size(&filename);
         let app_type_size = prepared_text_size(&app_type);
         let size_size = prepared_text_size(&size);
@@ -443,33 +484,30 @@ impl Frontend {
         painter: &egui::Painter,
         text: &str,
         point_size: f32,
-        bold: bool,
+        role: TextRole,
         color: Color32,
         max_width: Option<f32>,
     ) -> PreparedText {
-        #[cfg(target_os = "macos")]
-        {
-            self.text_renderer.borrow_mut().layout(
-                painter.ctx(),
-                text,
-                point_size,
-                bold,
-                color,
-                max_width,
-            )
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let family = if bold {
-                self.bold_font.clone()
-            } else {
-                self.regular_font.clone()
-            };
-            let font_id = FontId::new(point_size, family);
-            if let Some(max_width) = max_width {
-                layout_elided(painter, text, font_id, color, max_width)
-            } else {
-                painter.layout_no_wrap(text.to_owned(), font_id, color)
+        match &self.text_renderer {
+            TextRenderer::Egui(fonts) => {
+                let font_id = FontId::new(point_size, fonts.family(role));
+                let galley = if let Some(max_width) = max_width {
+                    layout_elided(painter, text, font_id, color, max_width)
+                } else {
+                    painter.layout_no_wrap(text.to_owned(), font_id, color)
+                };
+                PreparedText::Egui(galley)
+            }
+            #[cfg(target_os = "macos")]
+            TextRenderer::CoreText(renderer) => {
+                PreparedText::CoreText(renderer.borrow_mut().layout(
+                    painter.ctx(),
+                    text,
+                    point_size,
+                    role.is_bold(),
+                    color,
+                    max_width,
+                ))
             }
         }
     }
@@ -550,7 +588,7 @@ impl Frontend {
             ui.painter(),
             REPOSITORY_TEXT,
             12.0,
-            false,
+            TextRole::Footer,
             normal_color,
             None,
         );
@@ -571,7 +609,14 @@ impl Frontend {
             normal_color
         };
         let text = if response.hovered() {
-            self.layout_text(ui.painter(), REPOSITORY_TEXT, 12.0, false, color, None)
+            self.layout_text(
+                ui.painter(),
+                REPOSITORY_TEXT,
+                12.0,
+                TextRole::Footer,
+                color,
+                None,
+            )
         } else {
             measured_text
         };
@@ -579,39 +624,34 @@ impl Frontend {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn prepared_text_size(text: &PreparedText) -> Vec2 {
-    text.size
+    match text {
+        PreparedText::Egui(text) => text.size(),
+        #[cfg(target_os = "macos")]
+        PreparedText::CoreText(text) => text.size,
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn prepared_text_size(text: &PreparedText) -> Vec2 {
-    text.size()
-}
-
-#[cfg(target_os = "macos")]
-fn paint_prepared_text(
-    painter: &egui::Painter,
-    position: Pos2,
-    text: &PreparedText,
-    _color: Color32,
-) {
-    painter.image(
-        text.texture.id(),
-        Rect::from_min_size(position, text.size),
-        Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-#[cfg(not(target_os = "macos"))]
 fn paint_prepared_text(
     painter: &egui::Painter,
     position: Pos2,
     text: &PreparedText,
     color: Color32,
 ) {
-    painter.galley(position, text.clone(), color);
+    match text {
+        PreparedText::Egui(text) => {
+            painter.galley(position, text.clone(), color);
+        }
+        #[cfg(target_os = "macos")]
+        PreparedText::CoreText(text) => {
+            painter.image(
+                text.texture.id(),
+                Rect::from_min_size(position, text.size),
+                Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+    }
 }
 
 fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
@@ -779,7 +819,6 @@ fn paint_cover_image(painter: &egui::Painter, rect: Rect, texture: &TextureHandl
     painter.image(texture.id(), rect, uv, Color32::WHITE);
 }
 
-#[cfg(not(target_os = "macos"))]
 fn layout_elided(
     painter: &egui::Painter,
     text: &str,
@@ -874,8 +913,84 @@ fn bold_system_fonts() -> Vec<SystemFont> {
     ])
 }
 
+fn configure_text_renderer(
+    ctx: &egui::Context,
+    use_system_fonts: bool,
+) -> Result<TextRenderer, GuiError> {
+    if use_system_fonts {
+        #[cfg(target_os = "macos")]
+        return Ok(TextRenderer::CoreText(RefCell::new(
+            macos_text::CoreTextRenderer::new(),
+        )));
+
+        #[cfg(not(target_os = "macos"))]
+        return configure_system_fonts(ctx).map(TextRenderer::Egui);
+    }
+
+    Ok(TextRenderer::Egui(configure_embedded_fonts(ctx)))
+}
+
+fn configure_embedded_fonts(ctx: &egui::Context) -> EguiFonts {
+    const TITLE_NAME: &str = "cefdetector-embedded-title";
+    const CARD_REGULAR_NAME: &str = "cefdetector-embedded-card-regular";
+    const CARD_BOLD_NAME: &str = "cefdetector-embedded-card-bold";
+
+    let title = FontFamily::Name("cefdetector-title".into());
+    let card_regular = FontFamily::Name("cefdetector-card-regular".into());
+    let card_bold = FontFamily::Name("cefdetector-card-bold".into());
+    let footer = FontFamily::Name("cefdetector-footer".into());
+    let mut definitions = FontDefinitions::empty();
+    definitions.font_data.insert(
+        TITLE_NAME.into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../fonts/title-subset.ttf"
+        ))),
+    );
+    definitions.font_data.insert(
+        CARD_REGULAR_NAME.into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../fonts/card-regular-subset.ttf"
+        ))),
+    );
+    definitions.font_data.insert(
+        CARD_BOLD_NAME.into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../fonts/card-bold-subset.ttf"
+        ))),
+    );
+
+    definitions.families.insert(
+        FontFamily::Proportional,
+        vec![CARD_REGULAR_NAME.into(), TITLE_NAME.into()],
+    );
+    definitions
+        .families
+        .insert(FontFamily::Monospace, vec![CARD_REGULAR_NAME.into()]);
+    definitions
+        .families
+        .insert(title.clone(), vec![TITLE_NAME.into()]);
+    definitions
+        .families
+        .insert(card_regular.clone(), vec![CARD_REGULAR_NAME.into()]);
+    definitions
+        .families
+        .insert(card_bold.clone(), vec![CARD_BOLD_NAME.into()]);
+    definitions.families.insert(
+        footer.clone(),
+        vec![CARD_REGULAR_NAME.into(), TITLE_NAME.into()],
+    );
+    ctx.set_fonts(definitions);
+
+    EguiFonts {
+        title,
+        card_regular,
+        card_bold,
+        footer,
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
-fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiError> {
+fn configure_system_fonts(ctx: &egui::Context) -> Result<EguiFonts, GuiError> {
     let regular_family = FontFamily::Name("cefdetector-regular".into());
     let bold_family = FontFamily::Name("cefdetector-bold".into());
     let mut definitions = FontDefinitions::empty();
@@ -915,7 +1030,12 @@ fn configure_fonts(ctx: &egui::Context) -> Result<(FontFamily, FontFamily), GuiE
     definitions.families.insert(bold_family.clone(), bold_names);
     ctx.set_fonts(definitions);
 
-    Ok((regular_family, bold_family))
+    Ok(EguiFonts {
+        title: bold_family.clone(),
+        card_regular: regular_family.clone(),
+        card_bold: bold_family,
+        footer: regular_family,
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1276,10 +1396,11 @@ struct GlowApplication {
     frontend: Option<Frontend>,
     error: Option<GuiError>,
     exit_after_first_frame: bool,
+    use_system_fonts: bool,
 }
 
 impl GlowApplication {
-    fn new(proxy: winit::event_loop::EventLoopProxy<UserEvent>) -> Self {
+    fn new(proxy: winit::event_loop::EventLoopProxy<UserEvent>, use_system_fonts: bool) -> Self {
         Self {
             proxy,
             gl_window: None,
@@ -1288,6 +1409,7 @@ impl GlowApplication {
             frontend: None,
             error: None,
             exit_after_first_frame: std::env::var_os("CEFDETECTOR_GUI_SMOKE_TEST").is_some(),
+            use_system_fonts,
         }
     }
 
@@ -1312,7 +1434,7 @@ impl GlowApplication {
         egui.egui_ctx.set_request_repaint_callback(move |request| {
             let _ = proxy.send_event(UserEvent::Repaint(request.delay));
         });
-        let frontend = match Frontend::new(&egui.egui_ctx) {
+        let frontend = match Frontend::new(&egui.egui_ctx, self.use_system_fonts) {
             Ok(frontend) => frontend,
             Err(error) => {
                 egui.destroy();
@@ -1451,10 +1573,10 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
     }
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(use_system_fonts: bool) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
-    let mut app = GlowApplication::new(proxy);
+    let mut app = GlowApplication::new(proxy, use_system_fonts);
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.error {
         return Err(Box::new(error));
@@ -1464,7 +1586,41 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_size, scroll_from_thumb_drag};
+    use super::{
+        REPOSITORY_TEXT, SEARCHING_TEXT, TextRole, configure_embedded_fonts, format_size,
+        scroll_from_thumb_drag,
+    };
+
+    #[test]
+    fn embedded_font_subsets_stay_small() {
+        assert!(include_bytes!("../fonts/title-subset.ttf").len() <= 100 * 1024);
+        assert!(include_bytes!("../fonts/card-regular-subset.ttf").len() <= 20 * 1024);
+        assert!(include_bytes!("../fonts/card-bold-subset.ttf").len() <= 20 * 1024);
+    }
+
+    #[test]
+    fn embedded_fonts_cover_fixed_ui_text_but_not_cjk_card_names() {
+        let ctx = egui::Context::default();
+        let configured = configure_embedded_fonts(&ctx);
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let title = egui::FontId::new(18.0, configured.family(TextRole::Title));
+        let card = egui::FontId::new(11.0, configured.family(TextRole::CardRegular));
+        let footer = egui::FontId::new(12.0, configured.family(TextRole::Footer));
+
+        ctx.fonts_mut(|fonts| {
+            assert!(fonts.has_glyphs(&title, SEARCHING_TEXT));
+            assert!(fonts.has_glyphs(
+                &title,
+                "搜索完成！这台电脑上总共有 0123456789 个 Chromium 内核的应用 (1.23 GB)"
+            ));
+            assert!(fonts.has_glyphs(&footer, REPOSITORY_TEXT));
+            assert!(fonts.has_glyphs(
+                &card,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789. "
+            ));
+            assert!(!fonts.has_glyph(&card, '中'));
+        });
+    }
 
     #[test]
     fn size_format_matches_the_original_ui() {

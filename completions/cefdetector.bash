@@ -3,7 +3,7 @@ _cefdetector() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="-h --help -V --version -T --toml -J --json -C --csv -O --output"
+    opts="-h --help -V --version -T --toml -J --json -C --csv -O --output --system-font"
 
     case "${prev}" in
         -O|--output)
