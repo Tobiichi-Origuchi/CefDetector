@@ -108,6 +108,53 @@ function Build-BenchmarkBinaries {
         -Destination $everythingBinary
 }
 
+function Assert-IndexBackend {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Binary,
+
+        [Parameter(Mandatory)]
+        [string] $ExpectedBackend
+    )
+
+    $resultFile = Join-Path $temporaryRoot "backend-validation.json"
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Binary
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.WorkingDirectory = $workspace
+    foreach ($argument in @("cli", "--json", "--output", $resultFile)) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        throw "failed to start index backend validation: $Binary"
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult().Trim()
+    $stderr = $stderrTask.GetAwaiter().GetResult().Trim()
+    if ($process.ExitCode -ne 0) {
+        throw (
+            "index backend validation failed with status $($process.ExitCode): " +
+            "$stderr $stdout"
+        ).Trim()
+    }
+
+    $marker = "cefdetector-search-backend=$ExpectedBackend"
+    if (-not (($stderr -split "`r?`n") -contains $marker)) {
+        throw (
+            "expected index backend '$ExpectedBackend', but the scanner reported: " +
+            $(if ($stderr) { $stderr } else { "<no backend>" })
+        )
+    }
+    Write-Host "Verified index backend: $ExpectedBackend"
+}
+
 function New-ProcessStartInfo {
     param(
         [Parameter(Mandatory)]
@@ -397,6 +444,7 @@ try {
             throw "benchmark binary not found: $binary (run without -NoBuild)"
         }
     }
+    Assert-IndexBackend -Binary $everythingBinary -ExpectedBackend "everything"
 
     $backends = [ordered]@{
         ignore     = $ignoreBinary

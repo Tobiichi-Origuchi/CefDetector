@@ -292,6 +292,35 @@ done
 
 BENCH_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cefdetector-benchmark.XXXXXXXX")
 
+bench_assert_index_backend() {
+    local expected_backend=$1
+    local binary=$2
+    local result_file="${BENCH_TEMP_DIR}/backend-validation.json"
+    local stdout_file="${BENCH_TEMP_DIR}/backend-validation.out"
+    local stderr_file="${BENCH_TEMP_DIR}/backend-validation.err"
+    local exit_status marker stderr
+
+    if "${binary}" cli --json --output "${result_file}" \
+        >"${stdout_file}" 2>"${stderr_file}"; then
+        exit_status=0
+    else
+        exit_status=$?
+    fi
+    stderr=$(<"${stderr_file}")
+    if ((exit_status != 0)); then
+        bench_fail \
+            "index backend validation failed with status ${exit_status}: ${stderr}"
+    fi
+
+    marker="cefdetector-search-backend=${expected_backend}"
+    grep -Fqx -- "${marker}" "${stderr_file}" ||
+        bench_fail \
+            "expected index backend '${expected_backend}', but the scanner reported: ${stderr:-<no backend>}"
+    printf 'Verified index backend: %s\n' "${expected_backend}"
+}
+
+bench_assert_index_backend "plocate" "${BENCH_PLOCATE_BINARY}"
+
 bench_now_ns() {
     date +%s%N
 }

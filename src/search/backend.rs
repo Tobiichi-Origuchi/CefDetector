@@ -44,25 +44,34 @@ pub(super) trait CandidateSource {
 /// latency without proving that the complete operation works. Falling back on
 /// the real operation's error is both stronger and has no probe overhead.
 fn indexed_or_fallback<T>(
+    indexed_backend: &str,
     indexed: impl FnOnce() -> io::Result<T>,
     fallback: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
     match indexed() {
-        Ok(result) => Ok(result),
-        Err(indexed_error) => fallback().map_err(|fallback_error| {
-            io::Error::new(
+        Ok(result) => {
+            eprintln!("cefdetector-search-backend={indexed_backend}");
+            Ok(result)
+        }
+        Err(indexed_error) => match fallback() {
+            Ok(result) => {
+                eprintln!("cefdetector-search-backend=ignore");
+                Ok(result)
+            }
+            Err(fallback_error) => Err(io::Error::new(
                 fallback_error.kind(),
                 format!(
                     "indexed search failed ({indexed_error}); filesystem fallback failed ({fallback_error})"
                 ),
-            )
-        }),
+            )),
+        },
     }
 }
 
 #[cfg(all(feature = "index", target_os = "linux"))]
 pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
     indexed_or_fallback(
+        "plocate",
         || plocate::PlocateCandidateSource.find_candidates(),
         || ignore::IgnoreCandidateSource.find_candidates(),
     )
@@ -71,6 +80,7 @@ pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
 #[cfg(all(feature = "index", target_os = "windows"))]
 pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
     indexed_or_fallback(
+        "everything",
         || everything::EverythingCandidateSource.find_candidates(),
         || ignore::IgnoreCandidateSource.find_candidates(),
     )
@@ -79,6 +89,7 @@ pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
 #[cfg(all(feature = "index", target_os = "macos"))]
 pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
     indexed_or_fallback(
+        "spotlight",
         || spotlight::SpotlightCandidateSource.find_candidates(),
         || ignore::IgnoreCandidateSource.find_candidates(),
     )
@@ -129,6 +140,7 @@ mod tests {
     fn successful_index_search_does_not_touch_fallback() {
         let fallback_called = Cell::new(false);
         let result = indexed_or_fallback(
+            "test-index",
             || Ok(7),
             || {
                 fallback_called.set(true);
@@ -143,6 +155,7 @@ mod tests {
     #[test]
     fn failed_index_search_uses_filesystem_fallback() {
         let result = indexed_or_fallback(
+            "test-index",
             || Err(io::Error::other("index unavailable")),
             || Ok::<_, io::Error>(9),
         );
@@ -153,6 +166,7 @@ mod tests {
     #[test]
     fn failure_reports_both_backend_errors() {
         let error = indexed_or_fallback::<()>(
+            "test-index",
             || Err(io::Error::other("index unavailable")),
             || {
                 Err(io::Error::new(
