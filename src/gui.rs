@@ -1616,10 +1616,40 @@ mod tests {
             assert!(fonts.has_glyphs(&footer, REPOSITORY_TEXT));
             assert!(fonts.has_glyphs(
                 &card,
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789. "
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.… "
             ));
             assert!(!fonts.has_glyph(&card, '中'));
         });
+    }
+
+    #[test]
+    fn truncated_card_names_keep_their_layout_width() {
+        let ctx = egui::Context::default();
+        let configured = configure_embedded_fonts(&ctx);
+        let mut size = egui::Vec2::ZERO;
+        let mut elided = false;
+        let mut final_character = None;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let galley = super::layout_elided(
+                ui.painter(),
+                "CefSharp.BrowserSubprocess.exe",
+                egui::FontId::new(11.0, configured.family(TextRole::CardBold)),
+                egui::Color32::BLACK,
+                76.0,
+            );
+            size = galley.size();
+            elided = galley.elided;
+            final_character = galley
+                .rows
+                .last()
+                .and_then(|row| row.row.glyphs.last())
+                .map(|glyph| glyph.chr);
+        });
+
+        assert!(elided);
+        assert_eq!(final_character, Some('…'));
+        assert!(size.x > 0.0);
+        assert!(size.x <= 76.0);
     }
 
     #[test]

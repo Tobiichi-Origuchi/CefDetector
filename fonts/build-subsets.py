@@ -14,7 +14,7 @@ TITLE_TEXT = """正在全盘搜索 CEF 应用，请耐心等待...
 搜索完成！这台电脑上没有 Chromium 内核的应用
 搜索失败：
 Repo: github.com/Tobiichi-Origuchi/CefDetector (求个STAR!)"""
-CARD_TEXT = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789."
+CARD_TEXT = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.…"
 
 
 def set_names(
