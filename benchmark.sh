@@ -502,7 +502,7 @@ bench_start_process() {
     local -a arguments=()
 
     if [[ "${measure_mode}" == "scan" ]]; then
-        arguments=(--json --output "${result_file}")
+        arguments=(cli --json --output "${result_file}")
     fi
 
     if [[ "${measure_mode}" == "gui-startup" ]]; then
@@ -524,7 +524,7 @@ bench_warmup_scan() {
         printf 'Warmup %d/%d: %s scan\n' \
             "${warmup}" "${BENCH_SCAN_WARMUPS}" "${backend}"
         result_file="${BENCH_TEMP_DIR}/warmup-${backend}-scan-${warmup}.json"
-        "${binary}" --json --output "${result_file}"
+        "${binary}" cli --json --output "${result_file}"
     done
 }
 

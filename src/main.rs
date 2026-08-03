@@ -10,7 +10,9 @@ pub mod package_manager;
 pub mod search;
 
 fn main() {
-    let launch_options = cli::handle_cli();
+    let Some(launch_options) = cli::handle_arguments() else {
+        return;
+    };
 
     #[cfg(feature = "gui")]
     if let Err(error) = gui::run(launch_options.system_font) {
@@ -21,6 +23,5 @@ fn main() {
     #[cfg(not(feature = "gui"))]
     {
         let _ = launch_options;
-        cli::print_help();
     }
 }

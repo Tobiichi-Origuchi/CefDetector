@@ -431,7 +431,7 @@ bench_start_process() {
 
     if [[ "${measure_mode}" == "scan" ]]; then
         env -u CEFDETECTOR_GUI_SMOKE_TEST /usr/bin/time -l \
-            "${binary}" --json --output "${result_file}" \
+            "${binary}" cli --json --output "${result_file}" \
             >"${stdout_file}" 2>"${stderr_file}" &
     elif [[ "${measure_mode}" == "gui-startup" ]]; then
         CEFDETECTOR_GUI_SMOKE_TEST=1 /usr/bin/time -l \
@@ -452,7 +452,7 @@ bench_warmup_scan() {
         printf 'Warmup %d/%d: %s scan\n' \
             "${warmup}" "${BENCH_SCAN_WARMUPS}" "${backend}"
         result_file="${BENCH_TEMP_DIR}/warmup-${backend}-scan-${warmup}.json"
-        "${binary}" --json --output "${result_file}"
+        "${binary}" cli --json --output "${result_file}"
     done
 }
 

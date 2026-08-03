@@ -160,7 +160,7 @@ function Invoke-MeasuredProcess {
 
     [string[]] $arguments = @()
     if ($MeasureMode -eq "scan") {
-        $arguments = @("--json", "--output", $ResultFile)
+        $arguments = @("cli", "--json", "--output", $ResultFile)
     }
     $startInfo = New-ProcessStartInfo -Binary $Binary -Arguments $arguments `
         -ExitAfterFirstFrame ($MeasureMode -eq "gui-startup")

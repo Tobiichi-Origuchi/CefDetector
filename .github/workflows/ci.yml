@@ -210,7 +210,7 @@ jobs:
           target/release/cefdetector --version
           target/release/cefdetector --help
           /usr/bin/mdfind -0 'kMDItemContentTypeTree == "com.apple.application-bundle"' >/dev/null
-          target/release/cefdetector --json >/tmp/cefdetector.json
+          target/release/cefdetector cli --json >/tmp/cefdetector.json
           jq empty /tmp/cefdetector.json
 
       - name: Test GUI startup
