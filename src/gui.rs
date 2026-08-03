@@ -36,6 +36,9 @@ const REPOSITORY_URL: &str = "https://github.com/Tobiichi-Origuchi/CefDetector";
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
+const TITLE_FONT_SIZE: f32 = 18.0;
+const MIN_TITLE_FONT_SIZE: f32 = 12.0;
+const MAX_TITLE_FONT_SIZE: f32 = 64.0;
 const CARD_WIDTH: f32 = 94.0;
 const CARD_HEIGHT: f32 = 116.0;
 const CELL_WIDTH: f32 = 106.0;
@@ -270,7 +273,7 @@ impl Frontend {
         let status = self.layout_text(
             &painter,
             &self.search_status,
-            18.0,
+            title_font_size(root.size()),
             TextRole::Title,
             status_color,
             None,
@@ -733,6 +736,14 @@ fn format_size(len: u64) -> String {
         value /= 1024.0;
     }
     format!("{value:.2} {}", sizes[order])
+}
+
+fn title_font_size(window_size: Vec2) -> f32 {
+    let width_scale = window_size.x / WINDOW_WIDTH;
+    let height_scale = window_size.y / WINDOW_HEIGHT;
+    (TITLE_FONT_SIZE * width_scale.min(height_scale))
+        .clamp(MIN_TITLE_FONT_SIZE, MAX_TITLE_FONT_SIZE)
+        .round()
 }
 
 fn scroll_from_thumb_drag(
@@ -1588,7 +1599,7 @@ pub fn run(use_system_fonts: bool) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::{
         REPOSITORY_TEXT, SEARCHING_TEXT, TextRole, configure_embedded_fonts, format_size,
-        scroll_from_thumb_drag,
+        scroll_from_thumb_drag, title_font_size,
     };
 
     #[test]
@@ -1657,6 +1668,15 @@ mod tests {
         assert_eq!(format_size(0), "0.00 B");
         assert_eq!(format_size(1024), "1.00 KB");
         assert_eq!(format_size(1536), "1.50 KB");
+    }
+
+    #[test]
+    fn title_font_tracks_proportional_window_growth() {
+        assert_eq!(title_font_size(egui::vec2(800.0, 600.0)), 18.0);
+        assert_eq!(title_font_size(egui::vec2(1_600.0, 1_200.0)), 36.0);
+        assert_eq!(title_font_size(egui::vec2(1_600.0, 600.0)), 18.0);
+        assert_eq!(title_font_size(egui::vec2(400.0, 300.0)), 12.0);
+        assert_eq!(title_font_size(egui::vec2(8_000.0, 6_000.0)), 64.0);
     }
 
     #[test]
