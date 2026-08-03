@@ -22,7 +22,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::everything_protocol::{ITEM_FLAG_FOLDER, encode_query, parse_reply};
 use super::{CandidateSource, ScanCandidate, classify_candidate_name};
 
-const EVERYTHING_WINDOW_CLASS: &str = "EVERYTHING_TASKBAR_NOTIFICATION";
+// Everything 1.4 and 1.5 beta/release use the unnamed window class. The 1.5
+// alpha uses a named instance by default so it can run alongside 1.4.
+const EVERYTHING_WINDOW_CLASSES: [&str; 2] = [
+    "EVERYTHING_TASKBAR_NOTIFICATION",
+    "EVERYTHING_TASKBAR_NOTIFICATION_(1.5a)",
+];
 const REPLY_WINDOW_CLASS: &str = "CEFDETECTOR_EVERYTHING_IPC";
 const EVERYTHING_COPYDATA_QUERY_W: usize = 2;
 const QUERY_REPLY_ID: usize = 0x4345_4644;
@@ -73,6 +78,15 @@ fn wide_null(text: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+fn find_everything_window() -> Option<HWND> {
+    EVERYTHING_WINDOW_CLASSES.iter().find_map(|class_name| {
+        let class_name = wide_null(class_name);
+        // SAFETY: class_name is null-terminated and the title is unspecified.
+        let window = unsafe { FindWindowW(class_name.as_ptr(), ptr::null()) };
+        (!window.is_null()).then_some(window)
+    })
 }
 
 unsafe extern "system" fn reply_window_proc(
@@ -249,15 +263,12 @@ fn send_query(everything_window: HWND, reply_window: HWND) -> io::Result<()> {
 }
 
 fn run_ipc_query() -> io::Result<Vec<u8>> {
-    let everything_class = wide_null(EVERYTHING_WINDOW_CLASS);
-    // SAFETY: everything_class is null-terminated and the title is unspecified.
-    let everything_window = unsafe { FindWindowW(everything_class.as_ptr(), ptr::null()) };
-    if everything_window.is_null() {
+    let Some(everything_window) = find_everything_window() else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "Everything is not running; start the Everything desktop client and enable IPC",
         ));
-    }
+    };
 
     let mut state = QueryState::default();
     let reply_window = create_reply_window(&mut state)?;
@@ -354,5 +365,21 @@ impl CandidateSource for EverythingCandidateSource {
 
         candidates.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(candidates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EVERYTHING_WINDOW_CLASSES;
+
+    #[test]
+    fn known_everything_instances_are_probed_in_compatibility_order() {
+        assert_eq!(
+            EVERYTHING_WINDOW_CLASSES,
+            [
+                "EVERYTHING_TASKBAR_NOTIFICATION",
+                "EVERYTHING_TASKBAR_NOTIFICATION_(1.5a)",
+            ]
+        );
     }
 }
