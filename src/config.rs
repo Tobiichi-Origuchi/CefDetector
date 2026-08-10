@@ -2089,6 +2089,25 @@ fn load_file(
     required: bool,
     effective: &mut toml::Value,
 ) -> Result<bool, ConfigError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(render_source_diagnostic(
+                &format!("cannot load {kind} configuration"),
+                path,
+                "",
+                None,
+                "the path does not point to a regular file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false);
+        }
+        // Preserve the more useful open error below for required files and
+        // failures such as insufficient permissions.
+        Err(_) => {}
+    }
+
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {
