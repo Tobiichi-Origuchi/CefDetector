@@ -1,0 +1,339 @@
+# CEF Detector complete configuration example.
+#
+# All values below are the built-in defaults. Optional file and directory paths
+# are shown as commented examples so this file is valid and portable as-is.
+# Colors accept "#RRGGBB" or "#RRGGBBAA". Paths used for search roots, images,
+# icons, and custom fonts must be absolute. Arrays replace lower-precedence
+# arrays instead of being appended.
+
+version = 1
+
+[search]
+# Backend selection: "auto", "index", or "filesystem". "auto" tries the
+# platform index when compiled in and available, then uses the filesystem.
+backend = "auto"
+# Fall back to the filesystem if an indexed query fails.
+index_fallback = true
+# Optional absolute search roots. Omit this field to use platform defaults; an
+# explicitly configured list must not be empty.
+# roots = ["/home", "/opt"]
+# Absolute paths excluded from results for every backend.
+exclude_paths = []
+# Directory names pruned by the filesystem backend and filtered for all
+# backends. Each value must be one nonempty path component.
+exclude_directory_names = []
+# Apply CEF Detector's built-in platform exclusions.
+use_platform_excludes = true
+# Include hidden filesystem entries while walking.
+include_hidden = true
+# Respect .gitignore files while walking.
+respect_gitignore = false
+# Follow symbolic links while walking.
+follow_symlinks = false
+# Keep each filesystem walk on its starting filesystem.
+same_filesystem = false
+# Filesystem walker thread count: 0 selects automatically; allowed range 0..256.
+walk_threads = 0
+# Size calculation thread count: 0 selects automatically; allowed range 0..256.
+size_threads = 0
+# Include platform trash/recycle-bin locations.
+include_trash = false
+
+[search.plocate]
+# plocate executable name on PATH or executable path. Used on Linux with index.
+command = "plocate"
+# plocate query timeout in milliseconds. Allowed range: 100..600000.
+timeout_ms = 30000
+
+[search.everything]
+# Everything IPC send timeout in milliseconds. Allowed range: 100..600000.
+send_timeout_ms = 5000
+# Everything IPC reply timeout in milliseconds. Allowed range: 100..600000.
+reply_timeout_ms = 30000
+
+[search.spotlight]
+# mdfind executable name on PATH or executable path. Used on macOS with index.
+command = "/usr/bin/mdfind"
+# Spotlight query timeout in milliseconds. Allowed range: 100..600000.
+timeout_ms = 30000
+
+[gui.window]
+# Native window title. Allowed: any nonempty string.
+title = "CEF Detector"
+# Initial logical width in pixels. Allowed range: 100..16384.
+width = 800.0
+# Initial logical height in pixels. Allowed range: 100..16384.
+height = 600.0
+# Permit interactive window resizing.
+resizable = true
+# Start maximized.
+maximized = false
+# Start in borderless fullscreen.
+fullscreen = false
+
+[gui.background]
+# Optional absolute PNG, ICO, or WebP path. Omit it to use the embedded image.
+# path = "/absolute/path/to/background.webp"
+# Image scaling: "cover", "contain", or "stretch".
+fit = "cover"
+# Color painted if the image does not cover the window. Use #RRGGBB[AA].
+fallback_color = "#000000"
+# Texture sampling: "linear" for smooth scaling or "nearest" for hard pixels.
+filter = "linear"
+
+[gui.status]
+# Show the search status/title text.
+visible = true
+# Horizontal anchor as a fraction of window width. Allowed range: 0.0..1.0.
+x = 0.5
+# Vertical anchor as a fraction of window height. Allowed range: 0.0..1.0.
+y = 0.21
+# Text alignment around the anchor: "left", "center", or "right".
+horizontal_align = "center"
+# Base logical font size. Allowed range: 1..512.
+font_size = 18.0
+# Scale the title font with window size.
+dynamic_font_size = true
+# Lower dynamic title size limit. Allowed range: 1..512 and <= max_font_size.
+min_font_size = 12.0
+# Upper dynamic title size limit. Allowed range: 1..512 and >= min_font_size.
+max_font_size = 64.0
+# Searching/progress text color. Use #RRGGBB or #RRGGBBAA.
+searching_color = "#FFFFFF"
+# Successful/empty result text color. Use #RRGGBB or #RRGGBBAA.
+success_color = "#2196F3"
+# Search failure text color. Use #RRGGBB or #RRGGBBAA.
+error_color = "#F44336"
+# Text shown before results arrive. No placeholders are allowed.
+searching_text = "正在全盘搜索 CEF 应用，请耐心等待..."
+# Text shown during scanning. Allowed placeholders: {count} and {size}.
+progress_text = "这台电脑上已找到 {count} 个 Chromium 内核的应用 ({size}) - 搜索中..."
+# Text shown after a nonempty scan. Allowed placeholders: {count} and {size}.
+success_text = "搜索完成！这台电脑上总共有 {count} 个 Chromium 内核的应用 ({size})"
+# Text shown after an empty scan. No placeholders are allowed.
+empty_text = "搜索完成！这台电脑上没有 Chromium 内核的应用"
+# Text shown when scanning fails. Allowed placeholder: {error}.
+error_text = "搜索失败：{error}"
+
+[gui.grid]
+# Grid left edge as a fraction of window width. Allowed range: 0.0..1.0.
+x = 0.1
+# Grid top edge as a fraction of window height. Allowed range: 0.0..1.0.
+y = 0.3
+# Grid viewport width as a window fraction. Allowed range: >0.0..1.0.
+width = 0.8
+# Grid viewport height as a window fraction. Allowed range: >0.0..1.0.
+height = 0.6
+# Horizontal space allocated to each card in logical pixels. Must be positive.
+cell_width = 106.0
+# Vertical space allocated to each card in logical pixels. Must be positive.
+cell_height = 128.0
+# Minimum number of grid columns. Allowed range: 1..256.
+min_columns = 1
+# Result sort key: "size", "name", "type", "path", or "running".
+sort_by = "size"
+# Result sort order: "ascending" or "descending".
+sort_order = "descending"
+
+[gui.card]
+# Card width in logical pixels. Must be positive.
+width = 94.0
+# Card height in logical pixels. Must be positive.
+height = 116.0
+# Horizontal card offset within its grid cell. Must be nonnegative.
+offset_x = 6.0
+# Vertical card offset within its grid cell. Must be nonnegative.
+offset_y = 6.0
+# Horizontal inner text/icon padding. Must be nonnegative.
+padding_x = 6.0
+# Vertical inner text/icon padding. Must be nonnegative.
+padding_y = 12.0
+# Card corner radius in logical pixels. Must be nonnegative.
+corner_radius = 4.0
+# Card border width in logical pixels. Must be nonnegative.
+border_width = 1.0
+# Normal card fill color. Use #RRGGBB or #RRGGBBAA.
+background = "#FFFFFF4D"
+# Hovered card fill color. Use #RRGGBB or #RRGGBBAA.
+background_hover = "#FFFFFF8C"
+# Normal card border color. Use #RRGGBB or #RRGGBBAA.
+border_color = "#FFFFFF4D"
+# Hovered card border color. Use #RRGGBB or #RRGGBBAA.
+border_color_hover = "#FFFFFF8C"
+# Show application icons.
+icon_visible = true
+# Displayed icon width in logical pixels. Must be positive.
+icon_width = 36.0
+# Displayed icon height in logical pixels. Must be positive.
+icon_height = 36.0
+# Show the executable/application filename.
+filename_visible = true
+# Filename logical font size. Must be positive.
+filename_font_size = 11.0
+# Render filenames with the card-bold chain.
+filename_bold = true
+# Maximum filename text width before ellipsis. Must be positive.
+filename_max_width = 76.0
+# Show the detected application type.
+type_visible = true
+# Application-type logical font size. Must be positive.
+type_font_size = 10.0
+# Show disk usage.
+size_visible = true
+# Disk-usage logical font size. Must be positive.
+size_font_size = 9.0
+# Disk-usage text color. Use #RRGGBB or #RRGGBBAA.
+size_color = "#000000D6"
+# Text color for applications that are not running. Use #RRGGBB[AA].
+normal_text_color = "#000000"
+# Text color for running applications. Use #RRGGBB or #RRGGBBAA.
+running_text_color = "#4CAF50"
+# Vertical gap between text fields in logical pixels. Must be nonnegative.
+text_gap = 2.0
+# Unique field order. Allowed entries: "filename", "type", and "size".
+fields = ["filename", "type", "size"]
+# Card click behavior: "reveal", "open", or "none".
+click_action = "reveal"
+
+[gui.scrolling]
+# Mouse-wheel multiplier. Allowed finite range: 0.01..100.
+wheel_speed = 1.0
+# Permit dragging the grid content to scroll.
+drag_content = true
+# Scrollbar visibility: "auto", "always", or "hidden".
+scrollbar = "auto"
+
+[gui.scrollbar]
+# Scrollbar width in logical pixels. Must be positive.
+width = 8.0
+# Gap between the grid and scrollbar. Must be nonnegative.
+gap = 8.0
+# Minimum scrollbar thumb height in logical pixels. Must be positive.
+min_thumb_height = 20.0
+# Scrollbar corner radius in logical pixels. Must be nonnegative.
+corner_radius = 4.0
+# Scrollbar track color. Use #RRGGBB or #RRGGBBAA.
+track_color = "#FFFFFF1A"
+# Normal scrollbar thumb color. Use #RRGGBB or #RRGGBBAA.
+thumb_color = "#FFFFFF4D"
+# Hovered/dragged thumb color. Use #RRGGBB or #RRGGBBAA.
+thumb_hover_color = "#FFFFFF8C"
+
+[gui.size_format]
+# Unit divisor. The only allowed values are 1000 and 1024.
+base = 1024
+# Digits after the decimal point. Allowed range: 0..6.
+decimal_places = 2
+# Nonempty labels from bytes upward; the last label handles larger values.
+units = ["B", "KB", "MB", "GB", "TB"]
+
+[gui.fonts]
+# Font source: "embedded", "system", or "custom". Custom mode requires every
+# chain below to contain at least one readable TTF, OTF, TTC, or OTC face.
+mode = "embedded"
+# Ordered title fallback chain for custom mode. Each item accepts an absolute
+# path and a zero-based collection index; single-font TTF/OTF files require 0.
+# Example: [{ path = "/fonts/primary.ttc", index = 0 }, { path = "/fonts/fallback.ttf", index = 0 }]
+title = []
+# Ordered regular card-text fallback chain for custom mode. Same item format.
+card_regular = []
+# Ordered bold card-text fallback chain for custom mode. Same item format.
+card_bold = []
+# Ordered footer-text fallback chain for custom mode. Same item format.
+footer = []
+
+[gui.footer]
+# Show the footer link.
+visible = true
+# Clickable footer label. Must be nonempty while visible.
+text = "Repo: github.com/Tobiichi-Origuchi/CefDetector (求个STAR!)"
+# URL opened by the footer. Must be nonempty while visible.
+url = "https://github.com/Tobiichi-Origuchi/CefDetector"
+# Footer logical font size. Must be positive.
+font_size = 12.0
+# Footer distance from the left edge in logical pixels. Must be nonnegative.
+left = 10.0
+# Footer distance from the bottom edge in logical pixels. Must be nonnegative.
+bottom = 32.0
+# Normal footer text color. Use #RRGGBB or #RRGGBBAA.
+color = "#FFFFFFCC"
+# Hovered footer text color. Use #RRGGBB or #RRGGBBAA.
+hover_color = "#FFFFFF"
+
+[gui.progress]
+# Maximum result items delivered in one GUI update. Allowed range: 1..10000.
+batch_size = 20
+# Maximum update interval in milliseconds. Allowed range: 5..60000.
+batch_interval_ms = 50
+# Display results before the scan is complete.
+show_partial_results = true
+
+[gui.graphics]
+# Synchronize frame presentation to the display.
+vsync = true
+# Context API: "auto", "opengl", or "gles". macOS rejects "gles".
+api = "auto"
+# Linux context preference: "auto", "egl", or "glx"; ignored elsewhere.
+linux_display = "auto"
+
+[icons]
+# Enable icon lookup and decoding.
+enabled = true
+# Maximum decoded icon side in pixels. Allowed range: 1..4096.
+decode_max_size = 64
+# Optional absolute fallback PNG/ICO/WebP/SVG path (ICNS is also allowed on
+# macOS). Omit it to use the embedded fallback icon.
+# fallback_path = "/absolute/path/to/fallback.png"
+# Ordered unique lookup sources. Allowed entries: "bundle", "pe", "appimage",
+# "neighbor", "desktop", "package-manager", and "builtin".
+sources = [
+    "bundle",
+    "pe",
+    "appimage",
+    "neighbor",
+    "desktop",
+    "package-manager",
+    "builtin",
+]
+
+[icons.neighbor]
+# Relative subdirectories checked beside an application. Values must be nonempty.
+directories = [".", "resources", "assets"]
+# Ordered filename templates. {executable} is the only allowed placeholder.
+names = [
+    "{executable}.png",
+    "{executable}.svg",
+    "icon.png",
+    "logo.png",
+    "app.png",
+]
+
+[icons.linux]
+# Resolve icons through Linux desktop entries.
+desktop_files = true
+# Query supported Linux package managers for icons.
+package_managers = true
+# Additional absolute readable icon-theme directories. Allowed: any array.
+theme_directories = []
+
+[cli]
+# Pretty-print JSON and TOML.
+pretty = true
+# Result sort key: "size", "name", "type", "path", or "running".
+sort_by = "path"
+# Result sort order: "ascending" or "descending".
+sort_order = "ascending"
+# Replace an existing output file. False makes an existing destination an error.
+overwrite = true
+
+[cli.csv]
+# Write the CSV header row.
+header = true
+# One-character delimiter; quotes and line breaks are forbidden.
+delimiter = ","
+
+[diagnostics]
+# Report the selected search backend to stderr.
+report_backend = true
+# Report the selected graphics implementation to stderr.
+report_graphics = true

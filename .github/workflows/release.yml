@@ -222,6 +222,7 @@ jobs:
           New-Item -ItemType Directory -Force $stagingDirectory | Out-Null
           $packageFiles = @(
             "target/release/cefdetector.exe"
+            "config.toml.example"
             "README.md"
             "LICENSE"
             "fonts/OFL-Inter.txt"
@@ -295,6 +296,7 @@ jobs:
           unpacked="${RUNNER_TEMP}/smoke-$(basename "${archive}" .zip)"
           ditto -x -k "${archive}" "${unpacked}"
           CEFDETECTOR_GUI_SMOKE_TEST=1 "${unpacked}/CefDetector.app/Contents/MacOS/cefdetector"
+          test -f "${unpacked}/CefDetector.app/Contents/Resources/config.toml.example"
           codesign --verify --deep --strict --verbose=2 "${unpacked}/CefDetector.app"
           codesign_description="$(codesign --display --verbose=4 "${unpacked}/CefDetector.app" 2>&1)"
           printf '%s\n' "${codesign_description}"

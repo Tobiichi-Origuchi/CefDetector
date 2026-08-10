@@ -112,6 +112,9 @@ package_stage_common_files() {
         README.md \
         "${stage_dir}/usr/share/doc/cefdetector/README.md"
     install -Dm644 \
+        config.toml.example \
+        "${stage_dir}/usr/share/doc/cefdetector/config.toml.example"
+    install -Dm644 \
         fonts/NOTICE.txt \
         "${stage_dir}/usr/share/doc/cefdetector/FONT-NOTICE.txt"
 }
