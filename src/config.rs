@@ -29,27 +29,12 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-fn toml_error_help(message: &str) -> &'static str {
-    if message.contains("unknown field") {
-        "remove the unsupported field or compare its name with config.toml.example"
-    } else if message.contains("unknown variant") {
-        "choose one of the allowed values listed in the reason above"
-    } else if message.contains("invalid type") {
-        "use the value type shown for this field in config.toml.example"
-    } else if message.contains("missing field") {
-        "add the required field at the location shown above"
-    } else {
-        "check TOML quoting, brackets, commas, and key/value separators near this location"
-    }
-}
-
 fn render_source_diagnostic(
     summary: &str,
     path: &Path,
     content: &str,
     span: Option<std::ops::Range<usize>>,
     reason: &str,
-    help: &str,
 ) -> ConfigError {
     let mut output = format!("error: {summary}");
     if let Some(span) = span {
@@ -88,7 +73,14 @@ fn render_source_diagnostic(
     } else {
         output.push_str(&format!("\n --> {}", path.display()));
     }
-    output.push_str(&format!("\n  |\n  = reason: {reason}\n  = help: {help}"));
+    output.push_str("\n  |");
+    for (index, line) in reason.lines().enumerate() {
+        if index == 0 {
+            output.push_str(&format!("\n  = {line}"));
+        } else {
+            output.push_str(&format!("\n    {line}"));
+        }
+    }
     ConfigError(output)
 }
 
@@ -104,16 +96,21 @@ fn render_toml_diagnostic(
         content,
         error.span(),
         error.message(),
-        toml_error_help(error.message()),
     )
 }
 
 fn extract_validation_key(reason: &str) -> Option<&str> {
     const ROOTS: [&str; 6] = ["version", "search", "gui", "icons", "cli", "diagnostics"];
     reason.split_whitespace().find_map(|word| {
-        let word = word.trim_matches(|character: char| {
-            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.' | '[' | ']')
+        let word = word.trim_start_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-')
         });
+        let word = &word[..word
+            .find(|character: char| {
+                !character.is_ascii_alphanumeric()
+                    && !matches!(character, '_' | '-' | '.' | '[' | ']')
+            })
+            .unwrap_or(word.len())];
         ROOTS
             .iter()
             .any(|root| word == *root || word.starts_with(&format!("{root}.")))
@@ -127,52 +124,240 @@ fn strip_index(component: &str) -> &str {
         .map_or(component, |(name, _)| name)
 }
 
-fn locate_validation_key(content: &str, dotted_key: &str) -> Option<std::ops::Range<usize>> {
-    let components: Vec<_> = dotted_key.split('.').collect();
-    for index in (0..components.len()).rev() {
-        let key = strip_index(components[index]);
-        let expected_section = components[..index]
-            .iter()
-            .map(|component| strip_index(component))
-            .collect::<Vec<_>>()
-            .join(".");
-        let mut section = String::new();
-        let mut offset = 0;
-        for line in content.split_inclusive('\n') {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                section = trimmed.trim_matches(['[', ']']).trim().to_owned();
-            } else if section == expected_section
-                && let Some(rest) = trimmed.strip_prefix(key)
-                && rest.trim_start().starts_with('=')
-            {
-                let leading = line.len() - line.trim_start().len();
-                return Some(offset + leading..offset + leading + key.len());
+fn component_index(component: &str) -> Option<usize> {
+    component.split_once('[')?.1.strip_suffix(']')?.parse().ok()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AssignmentSpans {
+    key: std::ops::Range<usize>,
+    value: std::ops::Range<usize>,
+}
+
+#[derive(Default)]
+struct TomlScanState {
+    delimiter_depth: usize,
+    multiline_quote: Option<u8>,
+}
+
+impl TomlScanState {
+    fn is_top_level(&self) -> bool {
+        self.delimiter_depth == 0 && self.multiline_quote.is_none()
+    }
+
+    fn scan_line(&mut self, line: &str) {
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if let Some(quote) = self.multiline_quote {
+                if quote == b'"' && bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else if bytes[index..].starts_with(&[quote, quote, quote]) {
+                    self.multiline_quote = None;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+                continue;
             }
-            offset += line.len();
+
+            match bytes[index] {
+                b'#' => break,
+                quote @ (b'\'' | b'"') if bytes[index..].starts_with(&[quote, quote, quote]) => {
+                    self.multiline_quote = Some(quote);
+                    index += 3;
+                }
+                b'\'' => {
+                    index += 1;
+                    while index < bytes.len() && bytes[index] != b'\'' {
+                        index += 1;
+                    }
+                    index = (index + 1).min(bytes.len());
+                }
+                b'"' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        match bytes[index] {
+                            b'\\' => index = (index + 2).min(bytes.len()),
+                            b'"' => {
+                                index += 1;
+                                break;
+                            }
+                            _ => index += 1,
+                        }
+                    }
+                }
+                b'[' | b'{' => {
+                    self.delimiter_depth += 1;
+                    index += 1;
+                }
+                b']' | b'}' => {
+                    self.delimiter_depth = self.delimiter_depth.saturating_sub(1);
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+    }
+}
+
+fn normalize_toml_path(path: &str) -> String {
+    path.split('.')
+        .map(|component| {
+            let component = component.trim();
+            component
+                .strip_prefix('"')
+                .and_then(|component| component.strip_suffix('"'))
+                .or_else(|| {
+                    component
+                        .strip_prefix('\'')
+                        .and_then(|component| component.strip_suffix('\''))
+                })
+                .unwrap_or(component)
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn table_header_path(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    let (opening, closing) = if line.starts_with("[[") {
+        (2, "]]")
+    } else if line.starts_with('[') {
+        (1, "]")
+    } else {
+        return None;
+    };
+    let end = line[opening..].find(closing)? + opening;
+    Some(normalize_toml_path(line[opening..end].trim()))
+}
+
+fn assignment_equals(line: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, character) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(active), value) if active == value => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '=') => return Some(index),
+            _ => {}
         }
     }
     None
 }
 
-fn validation_help(reason: &str) -> &'static str {
-    if reason.contains("unknown variant") {
-        "choose one of the allowed values listed in the reason above"
-    } else if reason.contains("unknown field") {
-        "remove the unsupported field or compare its name with config.toml.example"
-    } else if reason.contains("font") && reason.contains("index") {
-        "use an index that exists in this TTF/OTF/TTC/OTC file"
-    } else if reason.contains("font") || reason.contains("background") || reason.contains("icon") {
-        "use an absolute path to a readable, supported file"
-    } else if reason.contains("absolute") {
-        "replace the relative path with a complete absolute path"
-    } else if reason.contains("between") || reason.contains("must be") {
-        "choose a value within the stated valid range"
-    } else if reason.contains("custom mode") {
-        "provide a nonempty ordered font-face list for every text role"
-    } else {
-        "correct this value and run `cefdetector config validate` again"
+fn assignment_value_end(line: &str, start: usize) -> usize {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut end = line.len();
+    for (relative, character) in line[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, character) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(active), value) if active == value => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '#') => {
+                end = start + relative;
+                break;
+            }
+            _ => {}
+        }
     }
+    while end > start && line.as_bytes()[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    end
+}
+
+fn parse_assignment(line: &str, offset: usize, section: &str) -> Option<(String, AssignmentSpans)> {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let equals = assignment_equals(line)?;
+    let key_start = line.len() - line.trim_start().len();
+    let key_end = line[..equals].trim_end().len();
+    if key_start == key_end {
+        return None;
+    }
+    let key = normalize_toml_path(&line[key_start..key_end]);
+    let full_key = if section.is_empty() {
+        key
+    } else {
+        format!("{section}.{key}")
+    };
+    let mut value_start = equals + 1;
+    while line
+        .as_bytes()
+        .get(value_start)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        value_start += 1;
+    }
+    let value_end = assignment_value_end(line, value_start);
+    Some((
+        full_key,
+        AssignmentSpans {
+            key: offset + key_start..offset + key_end,
+            value: offset + value_start..offset + value_end.max(value_start + 1),
+        },
+    ))
+}
+
+fn locate_validation_assignment(content: &str, dotted_key: &str) -> Option<AssignmentSpans> {
+    let components: Vec<_> = dotted_key.split('.').collect();
+    for index in (0..components.len()).rev() {
+        let expected_key = components[..=index]
+            .iter()
+            .map(|component| strip_index(component))
+            .collect::<Vec<_>>()
+            .join(".");
+        let indexed_section = components[..index].iter().enumerate().rev().find_map(
+            |(component_position, component)| {
+                Some((
+                    components[..=component_position]
+                        .iter()
+                        .map(|component| strip_index(component))
+                        .collect::<Vec<_>>()
+                        .join("."),
+                    component_index(component)?,
+                ))
+            },
+        );
+        let mut section = String::new();
+        let mut section_occurrences = 0;
+        let mut selected_occurrence = true;
+        let mut scan_state = TomlScanState::default();
+        let mut offset = 0;
+        for line in content.split_inclusive('\n') {
+            if scan_state.is_top_level() {
+                if let Some(path) = table_header_path(line) {
+                    section = path;
+                    if let Some((indexed_path, wanted)) = &indexed_section
+                        && &section == indexed_path
+                    {
+                        selected_occurrence = section_occurrences == *wanted;
+                        section_occurrences += 1;
+                    } else {
+                        selected_occurrence = indexed_section.is_none();
+                    }
+                } else if let Some((key, spans)) = parse_assignment(line, offset, &section)
+                    && key == expected_key
+                    && selected_occurrence
+                {
+                    return Some(spans);
+                }
+            }
+            scan_state.scan_line(line);
+            offset += line.len();
+        }
+    }
+    None
 }
 
 fn render_validation_diagnostic(
@@ -182,14 +367,23 @@ fn render_validation_diagnostic(
     error: &ConfigError,
 ) -> ConfigError {
     let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
-    let span = extract_validation_key(reason).and_then(|key| locate_validation_key(content, key));
+    let mut span = extract_validation_key(reason)
+        .and_then(|key| locate_validation_assignment(content, key))
+        .map(|assignment| assignment.value);
+    if span.is_none() && reason.contains("font face in custom mode") {
+        span = locate_validation_assignment(content, "gui.fonts.mode")
+            .map(|assignment| assignment.value);
+    }
+    if span.is_none() && reason.contains("min_font_size cannot exceed max_font_size") {
+        span = locate_validation_assignment(content, "gui.status.max_font_size")
+            .map(|assignment| assignment.value);
+    }
     render_source_diagnostic(
         &format!("unusable {kind} configuration"),
         path,
         content,
         span,
         reason,
-        validation_help(reason),
     )
 }
 
@@ -1359,10 +1553,11 @@ fn validate_search(config: &SearchConfig) -> Result<(), ConfigError> {
         u64::from(config.everything.reply_timeout_ms),
     )?;
     validate_timeout("search.spotlight.timeout_ms", config.spotlight.timeout_ms)?;
-    if config.plocate.command.as_os_str().is_empty()
-        || config.spotlight.command.as_os_str().is_empty()
-    {
-        return Err(ConfigError::new("indexed backend commands cannot be empty"));
+    if config.plocate.command.as_os_str().is_empty() {
+        return Err(ConfigError::new("search.plocate.command cannot be empty"));
+    }
+    if config.spotlight.command.as_os_str().is_empty() {
+        return Err(ConfigError::new("search.spotlight.command cannot be empty"));
     }
     if config.backend == SearchBackend::Index && !cfg!(feature = "index") {
         return Err(ConfigError::new(
@@ -1436,9 +1631,12 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
     normalized("gui.grid.y", config.grid.y)?;
     normalized("gui.grid.width", config.grid.width)?;
     normalized("gui.grid.height", config.grid.height)?;
-    if config.grid.width == 0.0 || config.grid.height == 0.0 {
+    if config.grid.width == 0.0 {
+        return Err(ConfigError::new("gui.grid.width must be greater than zero"));
+    }
+    if config.grid.height == 0.0 {
         return Err(ConfigError::new(
-            "gui.grid.width and gui.grid.height must be greater than zero",
+            "gui.grid.height must be greater than zero",
         ));
     }
     positive("gui.grid.cell_width", config.grid.cell_width)?;
@@ -1530,9 +1728,14 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
     positive("gui.footer.font_size", config.footer.font_size)?;
     nonnegative("gui.footer.left", config.footer.left)?;
     nonnegative("gui.footer.bottom", config.footer.bottom)?;
-    if config.footer.visible && (config.footer.text.is_empty() || config.footer.url.is_empty()) {
+    if config.footer.visible && config.footer.text.is_empty() {
         return Err(ConfigError::new(
-            "visible gui.footer requires nonempty text and url",
+            "gui.footer.text cannot be empty while the footer is visible",
+        ));
+    }
+    if config.footer.visible && config.footer.url.is_empty() {
+        return Err(ConfigError::new(
+            "gui.footer.url cannot be empty while the footer is visible",
         ));
     }
 
@@ -1601,10 +1804,14 @@ fn validate_icons(config: &IconConfig) -> Result<(), ConfigError> {
         .directories
         .iter()
         .any(|directory| directory.is_empty())
-        || config.neighbor.names.iter().any(String::is_empty)
     {
         return Err(ConfigError::new(
-            "icon neighbor directories and names cannot be empty",
+            "icons.neighbor.directories cannot contain empty entries",
+        ));
+    }
+    if config.neighbor.names.iter().any(String::is_empty) {
+        return Err(ConfigError::new(
+            "icons.neighbor.names cannot contain empty entries",
         ));
     }
     for name in &config.neighbor.names {
@@ -1836,14 +2043,19 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         merge_value(&mut effective, overlay);
         validate_effective(&effective).map_err(|error| {
             let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
-            let key_length = value.find('=').unwrap_or(value.len());
+            let assignment = parse_assignment(value, 0, "")
+                .expect("a parsed --set override always contains an assignment");
+            let span = if reason.contains("unknown field") {
+                assignment.1.key
+            } else {
+                assignment.1.value
+            };
             render_source_diagnostic(
                 "unusable --set override",
                 Path::new("<command line>"),
                 value,
-                Some(0..key_length),
+                Some(span),
                 reason,
-                validation_help(reason),
             )
         })?;
     }
@@ -1891,7 +2103,6 @@ fn load_file(
                 "",
                 None,
                 &format!("failed to open the file: {error}"),
-                "verify that the path exists and that the file is readable",
             ));
         }
     };
@@ -1902,9 +2113,17 @@ fn load_file(
             "",
             None,
             &format!("failed to inspect the file: {error}"),
-            "verify that the path points to a readable regular file",
         )
     })?;
+    if !metadata.is_file() {
+        return Err(render_source_diagnostic(
+            &format!("cannot load {kind} configuration"),
+            path,
+            "",
+            None,
+            "the path does not point to a regular file",
+        ));
+    }
     if metadata.len() > MAX_CONFIG_BYTES {
         return Err(render_source_diagnostic(
             &format!("cannot load {kind} configuration"),
@@ -1912,7 +2131,6 @@ fn load_file(
             "",
             None,
             "the file exceeds the 1 MiB safety limit",
-            "remove unrelated data or split the configuration into additional --config files",
         ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
@@ -1925,7 +2143,6 @@ fn load_file(
                 "",
                 None,
                 &format!("failed while reading the file: {error}"),
-                "verify that the file remains readable and try again",
             )
         })?;
     if bytes.len() as u64 > MAX_CONFIG_BYTES {
@@ -1935,7 +2152,6 @@ fn load_file(
             "",
             None,
             "the file exceeds the 1 MiB safety limit",
-            "remove unrelated data or split the configuration into additional --config files",
         ));
     }
     let content = String::from_utf8(bytes).map_err(|error| {
@@ -1945,7 +2161,6 @@ fn load_file(
             "",
             None,
             &format!("the file is not valid UTF-8: {error}"),
-            "save the TOML file as UTF-8 without binary data",
         )
     })?;
     let _: AppConfig = toml::from_str(&content)
@@ -1962,7 +2177,7 @@ fn validate_effective(value: &toml::Value) -> Result<(), ConfigError> {
     let config = value
         .clone()
         .try_into::<AppConfig>()
-        .map_err(|error| ConfigError::new(format!("invalid configuration structure: {error}")))?;
+        .map_err(|error| ConfigError::new(error.to_string()))?;
     config.validate()
 }
 
@@ -1982,16 +2197,16 @@ fn merge_value(base: &mut toml::Value, overlay: toml::Value) {
 }
 
 fn parse_override(input: &str) -> Result<toml::Value, ConfigError> {
-    let (path, value) = input.split_once('=').ok_or_else(|| {
+    let (raw_path, value) = input.split_once('=').ok_or_else(|| {
         render_source_diagnostic(
             "invalid --set override",
             Path::new("<command line>"),
             input,
             Some(0..input.len()),
             "the argument has no '=' separator",
-            "use the form --set dotted.key=TOML_VALUE",
         )
     })?;
+    let path = raw_path.trim();
     let parts: Vec<_> = path.split('.').collect();
     if parts.is_empty()
         || parts.iter().any(|part| {
@@ -2005,21 +2220,25 @@ fn parse_override(input: &str) -> Result<toml::Value, ConfigError> {
             "invalid --set override",
             Path::new("<command line>"),
             input,
-            Some(0..path.len()),
+            parse_assignment(input, 0, "")
+                .map(|(_, assignment)| assignment.key)
+                .or_else(|| Some(0..raw_path.len())),
             "the key is not a valid unquoted dotted TOML key",
-            "use letters, digits, underscores, hyphens, and dots between key components",
         ));
     }
 
     let document = format!("value = {value}");
     let mut parsed: toml::Table = toml::from_str(&document).map_err(|error| {
+        let value_start = input.find('=').map_or(input.len(), |index| index + 1);
+        let value_start = input[value_start..]
+            .find(|character: char| !character.is_whitespace())
+            .map_or(value_start, |index| value_start + index);
         render_source_diagnostic(
             &format!("invalid TOML value in --set {input:?}"),
             Path::new("<command line>"),
             input,
-            Some(path.len() + 1..input.len()),
+            Some(value_start..input.trim_end().len()),
             error.message(),
-            toml_error_help(error.message()),
         )
     })?;
     let value = parsed
@@ -2053,8 +2272,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        AppConfig, ConfigError, FontFaceConfig, FontMode, LoadOptions, RgbaColor, SearchBackend,
-        config_paths, format_effective, load, merge_value, parse_override,
+        AppConfig, ConfigError, FontFaceConfig, FontMode, LoadOptions, MAX_CONFIG_BYTES, RgbaColor,
+        SearchBackend, config_paths, extract_validation_key, format_effective, load,
+        locate_validation_assignment, merge_value, parse_override,
     };
 
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
@@ -2063,6 +2283,10 @@ mod tests {
 
     impl TempConfig {
         fn new(content: &str) -> Self {
+            Self::new_bytes(content.as_bytes())
+        }
+
+        fn new_bytes(content: &[u8]) -> Self {
             let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "cefdetector-config-{}-{sequence}.toml",
@@ -2077,6 +2301,55 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }
+    }
+
+    fn file_error(content: &str) -> String {
+        let config = TempConfig::new(content);
+        load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![config.0.clone()],
+            overrides: Vec::new(),
+        })
+        .unwrap_err()
+        .to_string()
+    }
+
+    fn override_error(value: &str) -> String {
+        load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: Vec::new(),
+            overrides: vec![value.into()],
+        })
+        .unwrap_err()
+        .to_string()
+    }
+
+    fn marked_fragment(message: &str) -> String {
+        let mut lines = message.lines();
+        while let Some(line) = lines.next() {
+            let Some((gutter, source)) = line.split_once(" | ") else {
+                continue;
+            };
+            if gutter.trim().parse::<usize>().is_err() {
+                continue;
+            }
+            let marker = lines
+                .next()
+                .and_then(|line| line.split_once(" | ").map(|(_, marker)| marker))
+                .expect("a diagnostic source line must be followed by its marker");
+            let start = marker
+                .chars()
+                .position(|character| character == '^')
+                .expect("a diagnostic marker must contain a caret");
+            let width = marker[start..]
+                .chars()
+                .take_while(|character| *character == '^')
+                .count();
+            return source.chars().skip(start).take(width).collect();
+        }
+        panic!("diagnostic has no marked source: {message}");
     }
 
     #[test]
@@ -2143,12 +2416,13 @@ mod tests {
         assert!(message.contains(&config.0.display().to_string()));
         assert!(message.contains("unknown field"));
         assert!(message.contains("2 | unknown = true"));
-        assert!(message.contains('^'));
-        assert!(message.contains("= help:"));
+        assert_eq!(marked_fragment(&message), "unknown");
+        assert!(!message.contains("reason:"));
+        assert!(!message.contains("help:"));
     }
 
     #[test]
-    fn toml_syntax_errors_include_source_location_and_help() {
+    fn toml_syntax_errors_include_source_location() {
         let config = TempConfig::new("[search]\nbackend = [\n");
         let error = load(&LoadOptions {
             no_system: true,
@@ -2161,8 +2435,8 @@ mod tests {
         assert!(message.contains("error: invalid explicit configuration"));
         assert!(message.contains(&config.0.display().to_string()));
         assert!(message.contains("2 | backend = ["));
-        assert!(message.contains("= reason:"));
-        assert!(message.contains("= help:"));
+        assert!(!message.contains("reason:"));
+        assert!(!message.contains("help:"));
     }
 
     #[test]
@@ -2182,7 +2456,104 @@ mod tests {
                 "missing {allowed:?} in {message}"
             );
         }
-        assert!(message.contains("choose one of the allowed values"));
+        assert_eq!(marked_fragment(&message), "'fast'");
+    }
+
+    #[test]
+    fn every_enum_reports_its_allowed_values_and_marks_the_override_value() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "search.backend=\"invalid\"",
+                "\"invalid\"",
+                &["auto", "index", "filesystem"],
+            ),
+            (
+                "gui.background.fit=\"invalid\"",
+                "\"invalid\"",
+                &["cover", "contain", "stretch"],
+            ),
+            (
+                "gui.background.filter=\"invalid\"",
+                "\"invalid\"",
+                &["linear", "nearest"],
+            ),
+            (
+                "gui.status.horizontal_align=\"invalid\"",
+                "\"invalid\"",
+                &["left", "center", "right"],
+            ),
+            (
+                "gui.grid.sort_by=\"invalid\"",
+                "\"invalid\"",
+                &["size", "name", "type", "path", "running"],
+            ),
+            (
+                "gui.grid.sort_order=\"invalid\"",
+                "\"invalid\"",
+                &["ascending", "descending"],
+            ),
+            (
+                "gui.card.click_action=\"invalid\"",
+                "\"invalid\"",
+                &["reveal", "open", "none"],
+            ),
+            (
+                "gui.card.fields=[\"invalid\"]",
+                "[\"invalid\"]",
+                &["filename", "type", "size"],
+            ),
+            (
+                "gui.scrolling.scrollbar=\"invalid\"",
+                "\"invalid\"",
+                &["auto", "always", "hidden"],
+            ),
+            (
+                "gui.fonts.mode=\"invalid\"",
+                "\"invalid\"",
+                &["embedded", "system", "custom"],
+            ),
+            (
+                "gui.graphics.api=\"invalid\"",
+                "\"invalid\"",
+                &["auto", "opengl", "gles"],
+            ),
+            (
+                "gui.graphics.linux_display=\"invalid\"",
+                "\"invalid\"",
+                &["auto", "egl", "glx"],
+            ),
+            (
+                "icons.sources=[\"invalid\"]",
+                "[\"invalid\"]",
+                &[
+                    "bundle",
+                    "pe",
+                    "appimage",
+                    "neighbor",
+                    "desktop",
+                    "package-manager",
+                    "builtin",
+                ],
+            ),
+            (
+                "cli.sort_by=\"invalid\"",
+                "\"invalid\"",
+                &["size", "name", "type", "path", "running"],
+            ),
+            (
+                "cli.sort_order=\"invalid\"",
+                "\"invalid\"",
+                &["ascending", "descending"],
+            ),
+        ];
+
+        for (input, expected_marker, allowed) in cases {
+            let message = override_error(input);
+            assert_eq!(marked_fragment(&message), *expected_marker, "{message}");
+            for value in *allowed {
+                assert!(message.contains(value), "missing {value:?} in {message}");
+            }
+        }
     }
 
     #[test]
@@ -2197,7 +2568,49 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("cannot load explicit configuration"));
         assert!(message.contains("failed to open the file"));
-        assert!(message.contains("verify that the path exists"));
+    }
+
+    #[test]
+    fn unreadable_config_shapes_have_specific_errors() {
+        let invalid_utf8 = TempConfig::new_bytes(&[0xFF, 0xFE]);
+        let message = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![invalid_utf8.0.clone()],
+            overrides: Vec::new(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("not valid UTF-8"), "{message}");
+        assert!(!message.contains("help:"), "{message}");
+
+        let oversized = TempConfig::new_bytes(&vec![b' '; MAX_CONFIG_BYTES as usize + 1]);
+        let message = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![oversized.0.clone()],
+            overrides: Vec::new(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("exceeds the 1 MiB safety limit"),
+            "{message}"
+        );
+
+        let directory = std::env::temp_dir();
+        let message = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![directory],
+            overrides: Vec::new(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("does not point to a regular file"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2214,7 +2627,7 @@ mod tests {
         assert!(message.contains(&config.0.display().to_string()));
         assert!(message.contains("gui.window.width"));
         assert!(message.contains("2 | width = 1"));
-        assert!(message.contains("^^^^^"));
+        assert_eq!(marked_fragment(&message), "1");
     }
 
     #[test]
@@ -2222,6 +2635,305 @@ mod tests {
         assert!(parse_override("gui.window.width=1200").is_ok());
         assert!(parse_override("gui..width=1200").is_err());
         assert!(parse_override("gui.window.width=wide").is_err());
+    }
+
+    #[test]
+    fn command_line_diagnostics_distinguish_keys_from_values() {
+        for (input, expected_marker, expected_reason) in [
+            ("search.same_filesystem=1", "1", "expected a boolean"),
+            (
+                "search.backend=\"fast\"",
+                "\"fast\"",
+                "expected one of `auto`, `index`, `filesystem`",
+            ),
+            (
+                "search.unknown=true",
+                "search.unknown",
+                "unknown field `unknown`",
+            ),
+            ("gui.window.width=1", "1", "between 100 and 16384"),
+            (
+                "gui.card.background=\"red\"",
+                "\"red\"",
+                "colors must start with '#'",
+            ),
+            ("search.exclude_paths=[1]", "[1]", "expected path string"),
+            (
+                "gui.background.path=\"relative.webp\"",
+                "\"relative.webp\"",
+                "must be absolute",
+            ),
+            (
+                " search.same_filesystem = 1 # TOML comment",
+                "1",
+                "expected a boolean",
+            ),
+            (
+                "search.same_filesystem=1979-05-27",
+                "1979-05-27",
+                "expected a boolean",
+            ),
+            (
+                "icons.sources=[\"builtin\", 1]",
+                "[\"builtin\", 1]",
+                "expected string only",
+            ),
+        ] {
+            let message = override_error(input);
+            assert_eq!(marked_fragment(&message), expected_marker, "{message}");
+            assert!(message.contains(expected_reason), "{message}");
+            assert!(!message.contains("reason:"), "{message}");
+            assert!(!message.contains("help:"), "{message}");
+        }
+    }
+
+    #[test]
+    fn semantic_command_line_diagnostics_cover_validation_branches() {
+        for (input, expected_marker, expected_reason) in [
+            ("version=2", "2", "unsupported configuration version 2"),
+            ("search.roots=[]", "[]", "search.roots cannot be empty"),
+            (
+                "search.exclude_directory_names=[\"a/b\"]",
+                "[\"a/b\"]",
+                "must be nonempty directory names",
+            ),
+            ("search.walk_threads=257", "257", "cannot exceed 256"),
+            (
+                "search.plocate.timeout_ms=99",
+                "99",
+                "between 100 and 600000",
+            ),
+            (
+                "search.plocate.command=\"\"",
+                "\"\"",
+                "search.plocate.command cannot be empty",
+            ),
+            (
+                "gui.window.title=\"\"",
+                "\"\"",
+                "gui.window.title cannot be empty",
+            ),
+            (
+                "gui.status.success_text=\"{bad}\"",
+                "\"{bad}\"",
+                "unsupported placeholder {bad}",
+            ),
+            ("gui.grid.height=0.0", "0.0", "must be greater than zero"),
+            ("gui.grid.min_columns=0", "0", "between 1 and 256"),
+            (
+                "gui.scrolling.wheel_speed=0.0",
+                "0.0",
+                "between 0.01 and 100",
+            ),
+            ("gui.scrollbar.gap=-1.0", "-1.0", "between 0 and 16384"),
+            ("gui.size_format.base=10", "10", "must be 1000 or 1024"),
+            ("gui.size_format.decimal_places=7", "7", "cannot exceed 6"),
+            (
+                "gui.size_format.units=[]",
+                "[]",
+                "must contain nonempty labels",
+            ),
+            (
+                "gui.footer.text=\"\"",
+                "\"\"",
+                "cannot be empty while the footer is visible",
+            ),
+            ("gui.progress.batch_size=0", "0", "between 1 and 10000"),
+            (
+                "gui.fonts.mode=\"custom\"",
+                "\"custom\"",
+                "must contain at least one font face in custom mode",
+            ),
+            ("icons.decode_max_size=0", "0", "between 1 and 4096"),
+            (
+                "icons.sources=[]",
+                "[]",
+                "cannot be empty while icons are enabled",
+            ),
+            (
+                "icons.neighbor.directories=[\"\"]",
+                "[\"\"]",
+                "cannot contain empty entries",
+            ),
+            (
+                "icons.neighbor.names=[\"{bad}.png\"]",
+                "[\"{bad}.png\"]",
+                "unsupported placeholder {bad}",
+            ),
+            (
+                "cli.csv.delimiter=\"\\\"\"",
+                "\"\\\"\"",
+                "cannot be a quote or line break",
+            ),
+        ] {
+            let message = override_error(input);
+            assert_eq!(marked_fragment(&message), expected_marker, "{message}");
+            assert!(message.contains(expected_reason), "{message}");
+        }
+    }
+
+    #[cfg(not(feature = "index"))]
+    #[test]
+    fn unavailable_index_feature_marks_the_requested_backend() {
+        let message = override_error("search.backend=\"index\"");
+        assert_eq!(marked_fragment(&message), "\"index\"", "{message}");
+        assert!(message.contains("requires a binary compiled with the index feature"));
+    }
+
+    #[test]
+    fn malformed_command_line_overrides_mark_the_malformed_part() {
+        for (input, expected_marker, expected_reason) in [
+            (
+                "search..roots=[]",
+                "search..roots",
+                "key is not a valid unquoted dotted TOML key",
+            ),
+            ("search.roots=[", "[", "unclosed array"),
+            (
+                "gui.grid.min_columns=999999999999999999999999",
+                "999999999999999999999999",
+                "expected any valid TOML value",
+            ),
+            (
+                "search.roots",
+                "search.roots",
+                "argument has no '=' separator",
+            ),
+        ] {
+            let message = parse_override(input).unwrap_err().to_string();
+            assert_eq!(marked_fragment(&message), expected_marker, "{message}");
+            assert!(message.contains(expected_reason), "{message}");
+        }
+    }
+
+    #[test]
+    fn file_diagnostics_mark_typed_and_semantic_values() {
+        for (content, expected_marker, expected_reason) in [
+            ("[search]\nsame_filesystem = 1\n", "1", "expected a boolean"),
+            (
+                "[search]\nbackend = \"fast\"\n",
+                "\"fast\"",
+                "expected one of `auto`, `index`, `filesystem`",
+            ),
+            (
+                "[gui.card]\nbackground = \"red\"\n",
+                "\"red\"",
+                "colors must start with '#'",
+            ),
+            (
+                "[gui.window]\nwidth = 1 # below the minimum\n",
+                "1",
+                "between 100 and 16384",
+            ),
+            (
+                "[gui.window]\n\"width\" = 1\n",
+                "1",
+                "between 100 and 16384",
+            ),
+            (
+                "[\"gui\".\"window\"] # quoted table path\nwidth = 1\n",
+                "1",
+                "between 100 and 16384",
+            ),
+            ("gui.window.width = 1\n", "1", "between 100 and 16384"),
+            (
+                "[gui.status]\nmin_font_size = 70.0\nmax_font_size = 64.0\n",
+                "70.0",
+                "cannot exceed max_font_size",
+            ),
+            (
+                "[gui.status]\nmax_font_size = 5.0\n",
+                "5.0",
+                "min_font_size cannot exceed max_font_size",
+            ),
+            (
+                "[gui.card]\nfields = [\"size\", \"size\"]\n",
+                "[\"size\", \"size\"]",
+                "cannot contain duplicates",
+            ),
+            (
+                "[gui.background]\npath = \"relative.webp\"\n",
+                "\"relative.webp\"",
+                "must be absolute",
+            ),
+            (
+                "[gui.background]\npath = \"relative#name.webp\" # comment\n",
+                "\"relative#name.webp\"",
+                "must be absolute",
+            ),
+            (
+                "[gui.fonts]\nmode = \"custom\"\n",
+                "\"custom\"",
+                "must contain at least one font face in custom mode",
+            ),
+            (
+                concat!(
+                    "[gui.fonts]\n",
+                    "mode = \"custom\"\n",
+                    "title = [{ path = \"relative.ttf\", index = 0 }]\n",
+                    "card_regular = [{ path = \"relative.ttf\", index = 0 }]\n",
+                    "card_bold = [{ path = \"relative.ttf\", index = 0 }]\n",
+                    "footer = [{ path = \"relative.ttf\", index = 0 }]\n",
+                ),
+                "[{ path = \"relative.ttf\", index = 0 }]",
+                "must be absolute",
+            ),
+        ] {
+            let message = file_error(content);
+            assert_eq!(marked_fragment(&message), expected_marker, "{message}");
+            assert!(message.contains(expected_reason), "{message}");
+        }
+    }
+
+    #[test]
+    fn multiline_collection_errors_mark_the_collection_start() {
+        let message = file_error("[gui.card]\nfields = [\n  \"size\",\n  \"size\",\n]\n");
+        assert_eq!(marked_fragment(&message), "[");
+        assert!(message.contains("cannot contain duplicates"));
+    }
+
+    #[test]
+    fn table_like_text_inside_multiline_strings_does_not_confuse_location() {
+        let message = file_error(concat!(
+            "[gui.footer]\n",
+            "text = \"\"\"\n",
+            "[gui.window]\n",
+            "\"\"\"\n",
+            "font_size = 0.0\n",
+        ));
+        assert_eq!(marked_fragment(&message), "0.0", "{message}");
+        assert!(message.contains("gui.footer.font_size"));
+    }
+
+    #[test]
+    fn array_table_indexes_select_the_responsible_entry() {
+        let content = concat!(
+            "[[gui.fonts.title]]\n",
+            "path = '/first.ttf'\n",
+            "index = 0\n",
+            "[[gui.fonts.title]]\n",
+            "path = '/second.ttf'\n",
+            "index = 7\n",
+        );
+        let assignment = locate_validation_assignment(content, "gui.fonts.title[1].index")
+            .expect("the second array-table entry must be located");
+        assert_eq!(&content[assignment.value], "7");
+    }
+
+    #[test]
+    fn validation_keys_stop_before_explanatory_punctuation() {
+        assert_eq!(
+            extract_validation_key(
+                "search.backend=\"index\" requires a binary compiled with the index feature"
+            ),
+            Some("search.backend")
+        );
+        assert_eq!(
+            extract_validation_key(
+                "gui.fonts.mode=\"system\" could not find a usable regular sans-serif font"
+            ),
+            Some("gui.fonts.mode")
+        );
     }
 
     #[test]
