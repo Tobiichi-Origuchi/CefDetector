@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::config::{IconConfig, IconSource};
+
 #[derive(Clone)]
 pub enum RawIcon {
     Svg(Arc<[u8]>),
@@ -75,7 +77,7 @@ fn decode_icns(path: &Path) -> Option<RawIcon> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn find_icon_in_theme(icon_name: &str) -> Option<PathBuf> {
+pub fn find_icon_in_theme(icon_name: &str, config: &IconConfig) -> Option<PathBuf> {
     if let Some(cached) = ICON_THEME_CACHE.lock().unwrap().get(icon_name) {
         return cached.clone();
     }
@@ -107,8 +109,14 @@ pub fn find_icon_in_theme(icon_name: &str) -> Option<PathBuf> {
     let result = {
         let mut found = None;
         for ext in ["png", "svg"] {
-            for dir in search_dirs {
-                let p = Path::new(dir).join(format!("{}.{}", icon_name, ext));
+            for dir in config
+                .linux
+                .theme_directories
+                .iter()
+                .map(PathBuf::as_path)
+                .chain(search_dirs.iter().map(Path::new))
+            {
+                let p = dir.join(format!("{}.{}", icon_name, ext));
                 if p.exists() {
                     found = Some(p);
                     break;
@@ -139,7 +147,7 @@ pub fn find_icon_in_theme(icon_name: &str) -> Option<PathBuf> {
     result
 }
 
-pub fn find_neighboring_icon(exe_path: &Path) -> Option<PathBuf> {
+pub fn find_neighboring_icon(exe_path: &Path, config: &IconConfig) -> Option<PathBuf> {
     let parent = exe_path.parent()?;
 
     if let Some(cached) = NEIGHBOR_ICON_CACHE.lock().unwrap().get(parent) {
@@ -149,25 +157,18 @@ pub fn find_neighboring_icon(exe_path: &Path) -> Option<PathBuf> {
     let exe_name = exe_path.file_name()?.to_string_lossy().to_string();
 
     let result = (|| {
-        let mut dirs_to_check = vec![parent.to_path_buf()];
-        let resources_dir = parent.join("resources");
-        if resources_dir.exists() {
-            dirs_to_check.push(resources_dir);
-        }
-        let assets_dir = parent.join("assets");
-        if assets_dir.exists() {
-            dirs_to_check.push(assets_dir);
-        }
-
-        let name_pat = [format!("{}.png", exe_name), format!("{}.svg", exe_name)];
-        let name_fixed = ["icon.png", "logo.png", "app.png"];
+        let dirs_to_check = config
+            .neighbor
+            .directories
+            .iter()
+            .map(|directory| parent.join(directory));
 
         for dir in dirs_to_check {
-            for name in name_pat
-                .iter()
-                .map(|s| s.as_str())
-                .chain(name_fixed.iter().copied())
-            {
+            if !dir.is_dir() {
+                continue;
+            }
+            for template in &config.neighbor.names {
+                let name = template.replace("{executable}", &exe_name);
                 let p = dir.join(name);
                 if p.exists() {
                     return Some(p);
@@ -185,7 +186,7 @@ pub fn find_neighboring_icon(exe_path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn find_icon_via_desktop_file(exe_path: &Path) -> Option<PathBuf> {
+pub fn find_icon_via_desktop_file(exe_path: &Path, config: &IconConfig) -> Option<PathBuf> {
     if let Some(cached) = DESKTOP_CACHE.lock().unwrap().get(exe_path) {
         return cached.clone();
     }
@@ -202,7 +203,7 @@ pub fn find_icon_via_desktop_file(exe_path: &Path) -> Option<PathBuf> {
             let path = PathBuf::from(icon);
             path.is_file().then_some(path)
         } else {
-            find_icon_in_theme(&icon)
+            find_icon_in_theme(&icon, config)
         }
     });
 
@@ -541,70 +542,96 @@ pub fn clear_icon_caches() {
     }
 }
 
-pub fn get_app_icon(path: String) -> RawIcon {
+pub fn configured_fallback_icon(config: &IconConfig) -> RawIcon {
+    if !config.enabled || !config.sources.contains(&IconSource::Builtin) {
+        return RawIcon::Empty;
+    }
+    config
+        .fallback_path
+        .as_deref()
+        .and_then(try_icon_from_path)
+        .unwrap_or_else(|| DEFAULT_ICON.clone())
+}
+
+pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
+    if !config.enabled {
+        return RawIcon::Empty;
+    }
     let exe_path = Path::new(&path);
 
     if let Some(cached) = RAW_ICON_CACHE.lock().unwrap().get(exe_path) {
         return cached.clone();
     }
 
-    #[cfg(target_os = "macos")]
-    if let Some(icon_path) = crate::search::macos::bundle_icon_path(exe_path)
-        && let Some(icon) = try_icon_from_path(&icon_path)
-    {
-        RAW_ICON_CACHE
-            .lock()
-            .unwrap()
-            .insert(exe_path.to_path_buf(), icon.clone());
-        return icon;
-    }
-
-    if let Some(b) = find_icon_via_pe(exe_path) {
-        let result = b;
-        RAW_ICON_CACHE
-            .lock()
-            .unwrap()
-            .insert(exe_path.to_path_buf(), result.clone());
-        return result;
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(b) = find_icon_via_appimage(exe_path) {
-        let result = b;
-        RAW_ICON_CACHE
-            .lock()
-            .unwrap()
-            .insert(exe_path.to_path_buf(), result.clone());
-        return result;
-    }
-
-    if let Some(p) = find_neighboring_icon(exe_path)
-        && let Some(icon) = try_icon_from_path(&p)
-    {
-        RAW_ICON_CACHE
-            .lock()
-            .unwrap()
-            .insert(exe_path.to_path_buf(), icon.clone());
-        return icon;
-    }
-
-    #[cfg(target_os = "linux")]
-    for path_finder in [
-        |ep: &Path| find_icon_via_desktop_file(ep),
-        |ep: &Path| crate::package_manager::find_icon_via_package_manager(ep),
-    ] {
-        if let Some(p) = path_finder(exe_path)
-            && let Some(icon) = try_icon_from_path(&p)
-        {
-            RAW_ICON_CACHE
-                .lock()
-                .unwrap()
-                .insert(exe_path.to_path_buf(), icon.clone());
-            return icon;
+    let mut icon = None;
+    for source in &config.sources {
+        icon = match source {
+            IconSource::Bundle => {
+                #[cfg(target_os = "macos")]
+                {
+                    crate::search::macos::bundle_icon_path(exe_path)
+                        .as_deref()
+                        .and_then(try_icon_from_path)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None
+                }
+            }
+            IconSource::Pe => find_icon_via_pe(exe_path),
+            IconSource::Appimage => {
+                #[cfg(target_os = "linux")]
+                {
+                    find_icon_via_appimage(exe_path)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    None
+                }
+            }
+            IconSource::Neighbor => find_neighboring_icon(exe_path, config)
+                .as_deref()
+                .and_then(try_icon_from_path),
+            IconSource::Desktop => {
+                #[cfg(target_os = "linux")]
+                {
+                    config
+                        .linux
+                        .desktop_files
+                        .then(|| find_icon_via_desktop_file(exe_path, config))
+                        .flatten()
+                        .as_deref()
+                        .and_then(try_icon_from_path)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    None
+                }
+            }
+            IconSource::PackageManager => {
+                #[cfg(target_os = "linux")]
+                {
+                    config
+                        .linux
+                        .package_managers
+                        .then(|| crate::package_manager::find_icon_via_package_manager(exe_path))
+                        .flatten()
+                        .as_deref()
+                        .and_then(try_icon_from_path)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    None
+                }
+            }
+            IconSource::Builtin => Some(configured_fallback_icon(config)),
+        };
+        if icon.is_some() {
+            break;
         }
     }
 
-    let icon = DEFAULT_ICON.clone();
+    let icon = icon.unwrap_or(RawIcon::Empty);
     RAW_ICON_CACHE
         .lock()
         .unwrap()
@@ -614,7 +641,10 @@ pub fn get_app_icon(path: String) -> RawIcon {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use super::{desktop_exec_tokens, executable_name, parse_desktop_entry};
+    use super::{
+        RawIcon, clear_icon_caches, configured_fallback_icon, desktop_exec_tokens, executable_name,
+        find_neighboring_icon, parse_desktop_entry,
+    };
 
     #[test]
     fn desktop_exec_parser_handles_quotes_and_env() {
@@ -641,6 +671,29 @@ Icon=wrong-icon\n";
         let (executables, icon) = parse_desktop_entry(entry).unwrap();
         assert_eq!(executables, ["example", "example"]);
         assert_eq!(icon, "example-icon");
+    }
+
+    #[test]
+    fn neighboring_icon_templates_and_builtin_source_are_configurable() {
+        let root =
+            std::env::temp_dir().join(format!("cefdetector-icon-config-{}", std::process::id()));
+        let executable = root.join("bin/demo");
+        let icon = root.join("bin/art/demo.mark");
+        std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        std::fs::write(&executable, []).unwrap();
+        std::fs::write(&icon, []).unwrap();
+
+        let mut config = crate::config::IconConfig::default();
+        config.neighbor.directories = vec!["art".into()];
+        config.neighbor.names = vec!["{executable}.mark".into()];
+        clear_icon_caches();
+        assert_eq!(find_neighboring_icon(&executable, &config), Some(icon));
+
+        config
+            .sources
+            .retain(|source| *source != crate::config::IconSource::Builtin);
+        assert!(matches!(configured_fallback_icon(&config), RawIcon::Empty));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

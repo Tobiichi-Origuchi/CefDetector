@@ -24,7 +24,7 @@ use crate::config::{
     AppConfig, BackgroundFit, CardField, ClickAction, FontMode, GraphicsApi, HorizontalAlign,
     LinuxDisplay, RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
 };
-use crate::icon_finder::{RawIcon, get_app_icon};
+use crate::icon_finder::{RawIcon, configured_fallback_icon, get_app_icon};
 use crate::search::core_search;
 
 #[cfg(target_os = "macos")]
@@ -168,8 +168,11 @@ impl Frontend {
         let default_icon = load_texture(
             ctx,
             "default-cef-icon",
-            decode_raster(include_bytes!("../icons/default_cef_icon.ico"), true, 64)
-                .ok_or_else(|| GuiError("embedded default_cef_icon.ico is invalid".into()))?,
+            decode_icon(
+                &configured_fallback_icon(&config.icons),
+                config.icons.decode_max_size,
+            )
+            .unwrap_or_else(|| ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0])),
             TextureOptions::LINEAR,
         );
 
@@ -530,12 +533,13 @@ impl Frontend {
             }
         }
 
-        let element_count = text.len() + usize::from(card_config.icon_visible);
+        let icon_visible = card_config.icon_visible && self.config.icons.enabled;
+        let element_count = text.len() + usize::from(icon_visible);
         let content_height = text
             .iter()
             .map(|(prepared, _)| prepared_text_size(prepared).y)
             .sum::<f32>()
-            + if card_config.icon_visible {
+            + if icon_visible {
                 card_config.icon_height
             } else {
                 0.0
@@ -547,7 +551,7 @@ impl Frontend {
             + ((available_height - content_height) * 0.5).max(0.0);
         let center_x = card.center().x;
 
-        if card_config.icon_visible {
+        if icon_visible {
             // Slint's default image-fit is `fill` when both dimensions are explicit.
             let icon_rect = Rect::from_center_size(
                 pos2(center_x, y + card_config.icon_height * 0.5),
@@ -798,7 +802,7 @@ fn spawn_search(
                 .into_owned();
             let size = info.size;
             batch.push(PendingItem {
-                icon_raw: get_app_icon(info.file.clone()),
+                icon_raw: get_app_icon(info.file.clone(), &config.icons),
                 file: info.file,
                 app_type: info.app_type,
                 size,

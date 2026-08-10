@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[cfg(feature = "gui")]
 use crate::config::FontMode;
-use crate::config::{self, AppConfig, LoadOptions};
+use crate::config::{self, AppConfig, CliConfig, LoadOptions, SortKey, SortOrder};
 use crate::models::AppInfo;
 use crate::search::core_search;
 
@@ -266,70 +266,166 @@ fn push_json_string(output: &mut String, value: &str) {
     output.push('"');
 }
 
-fn format_json(results: &[AppInfo]) -> String {
+fn format_json(results: &[AppInfo], pretty: bool) -> String {
     let mut output = String::from("[");
     for (index, result) in results.iter().enumerate() {
         if index > 0 {
             output.push(',');
         }
-        output.push_str("\n  {\n    \"file\": ");
+        output.push_str(if pretty {
+            "\n  {\n    \"file\": "
+        } else {
+            "{\"file\":"
+        });
         push_json_string(&mut output, &result.file);
-        output.push_str(",\n    \"app_type\": ");
+        output.push_str(if pretty {
+            ",\n    \"app_type\": "
+        } else {
+            ",\"app_type\":"
+        });
         push_json_string(&mut output, &result.app_type);
-        write!(
-            output,
-            ",\n    \"size\": {},\n    \"is_running\": {},\n    \"is_dir\": {}\n  }}",
-            result.size, result.is_running, result.is_dir
-        )
-        .unwrap();
+        if pretty {
+            write!(
+                output,
+                ",\n    \"size\": {},\n    \"is_running\": {},\n    \"is_dir\": {}\n  }}",
+                result.size, result.is_running, result.is_dir
+            )
+            .unwrap();
+        } else {
+            write!(
+                output,
+                ",\"size\":{},\"is_running\":{},\"is_dir\":{}}}",
+                result.size, result.is_running, result.is_dir
+            )
+            .unwrap();
+        }
     }
-    if !results.is_empty() {
+    if pretty && !results.is_empty() {
         output.push('\n');
     }
     output.push(']');
     output
 }
 
-fn format_results(results: &[AppInfo], format: OutputFormat) -> String {
+fn push_toml_string(output: &mut String, value: &str) {
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            '\u{00}'..='\u{1f}' | '\u{7f}' => {
+                write!(output, "\\u{:04X}", character as u32).unwrap();
+            }
+            _ => output.push(character),
+        }
+    }
+    output.push('"');
+}
+
+fn push_csv_field(output: &mut String, value: &str) {
+    output.push('"');
+    for character in value.chars() {
+        if character == '"' {
+            output.push('"');
+        }
+        output.push(character);
+    }
+    output.push('"');
+}
+
+fn format_results(results: &[AppInfo], format: OutputFormat, config: &CliConfig) -> String {
     match format {
-        OutputFormat::Json => format_json(results),
+        OutputFormat::Json => format_json(results, config.pretty),
         OutputFormat::Toml => {
             let mut output = String::new();
             for result in results {
-                output.push_str("[[app]]\n");
-                output.push_str(&format!(
-                    "file = \"{}\"\n",
-                    result.file.replace("\\", "\\\\").replace("\"", "\\\"")
-                ));
-                output.push_str(&format!("app_type = \"{}\"\n", result.app_type));
-                output.push_str(&format!("size = {}\n", result.size));
-                output.push_str(&format!("is_running = {}\n", result.is_running));
-                output.push_str(&format!("is_dir = {}\n\n", result.is_dir));
+                let separator = if config.pretty { " = " } else { "=" };
+                output.push_str("[[app]]\nfile");
+                output.push_str(separator);
+                push_toml_string(&mut output, &result.file);
+                output.push_str("\napp_type");
+                output.push_str(separator);
+                push_toml_string(&mut output, &result.app_type);
+                write!(
+                    output,
+                    "\nsize{separator}{}\nis_running{separator}{}\nis_dir{separator}{}\n",
+                    result.size, result.is_running, result.is_dir
+                )
+                .unwrap();
+                if config.pretty {
+                    output.push('\n');
+                }
             }
             output
         }
         OutputFormat::Csv => {
-            let mut output = String::from("file,app_type,size,is_running,is_dir\n");
+            let delimiter = config.csv.delimiter;
+            let mut output = String::new();
+            if config.csv.header {
+                writeln!(
+                    output,
+                    "file{delimiter}app_type{delimiter}size{delimiter}is_running{delimiter}is_dir"
+                )
+                .unwrap();
+            }
             for result in results {
-                let escaped_file = result.file.replace('"', "\"\"");
-                output.push_str(&format!(
-                    "\"{}\",\"{}\",{},{},{}\n",
-                    escaped_file, result.app_type, result.size, result.is_running, result.is_dir
-                ));
+                push_csv_field(&mut output, &result.file);
+                output.push(delimiter);
+                push_csv_field(&mut output, &result.app_type);
+                writeln!(
+                    output,
+                    "{delimiter}{}{delimiter}{}{delimiter}{}",
+                    result.size, result.is_running, result.is_dir
+                )
+                .unwrap();
             }
             output
         }
     }
 }
 
+fn sort_results(results: &mut [AppInfo], key: SortKey, order: SortOrder) {
+    results.sort_by(|left, right| {
+        let ordering = match key {
+            SortKey::Size => left.size.cmp(&right.size),
+            SortKey::Name => std::path::Path::new(&left.file)
+                .file_name()
+                .cmp(&std::path::Path::new(&right.file).file_name()),
+            SortKey::Type => left.app_type.cmp(&right.app_type),
+            SortKey::Path => left.file.cmp(&right.file),
+            SortKey::Running => left.is_running.cmp(&right.is_running),
+        };
+        if order == SortOrder::Ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+}
+
 fn run_cli(config: &AppConfig, options: CliOptions) -> Result<(), String> {
     let mut results = Vec::new();
     core_search(config, |info| results.push(info))
         .map_err(|error| format!("search failed: {error}"))?;
+    sort_results(&mut results, config.cli.sort_by, config.cli.sort_order);
 
-    let output = format_results(&results, options.output_format);
+    let output = format_results(&results, options.output_format, &config.cli);
     if let Some(path) = options.output_path {
-        std::fs::write(&path, output)
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(config.cli.overwrite)
+            .create_new(!config.cli.overwrite)
+            .open(&path)
+            .map_err(|error| format!("failed to open {path} for output: {error}"))?;
+        file.write_all(output.as_bytes())
             .map_err(|error| format!("failed to write {path}: {error}"))?;
     } else {
         println!("{output}");
@@ -452,8 +548,9 @@ mod tests {
     use super::GuiCliOptions;
     use super::{
         Action, CliOptions, ConfigCommand, OutputFormat, extract_global_options, format_json,
-        parse_arguments, push_json_string,
+        format_results, parse_arguments, push_json_string,
     };
+    use crate::config::CliConfig;
     use crate::models::AppInfo;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -546,16 +643,60 @@ mod tests {
 
     #[test]
     fn json_output_keeps_the_cli_schema() {
-        let output = format_json(&[AppInfo {
-            file: "/tmp/app".into(),
-            app_type: "CEF".into(),
-            size: 42,
-            is_running: true,
-            is_dir: false,
-        }]);
+        let output = format_json(
+            &[AppInfo {
+                file: "/tmp/app".into(),
+                app_type: "CEF".into(),
+                size: 42,
+                is_running: true,
+                is_dir: false,
+            }],
+            true,
+        );
         assert_eq!(
             output,
             "[\n  {\n    \"file\": \"/tmp/app\",\n    \"app_type\": \"CEF\",\n    \"size\": 42,\n    \"is_running\": true,\n    \"is_dir\": false\n  }\n]"
         );
+    }
+
+    #[test]
+    fn compact_json_and_csv_settings_are_applied() {
+        let results = [AppInfo {
+            file: "/tmp/a,\"b\n".into(),
+            app_type: "CEF".into(),
+            size: 42,
+            is_running: true,
+            is_dir: false,
+        }];
+        assert_eq!(
+            format_json(&results, false),
+            "[{\"file\":\"/tmp/a,\\\"b\\n\",\"app_type\":\"CEF\",\"size\":42,\"is_running\":true,\"is_dir\":false}]"
+        );
+
+        let mut config = CliConfig::default();
+        config.csv.header = false;
+        config.csv.delimiter = ';';
+        assert_eq!(
+            format_results(&results, OutputFormat::Csv, &config),
+            "\"/tmp/a,\"\"b\n\";\"CEF\";42;true;false\n"
+        );
+    }
+
+    #[test]
+    fn toml_output_escapes_control_characters() {
+        let output = format_results(
+            &[AppInfo {
+                file: "C:\\line\nnext".into(),
+                app_type: "C\"EF".into(),
+                size: 1,
+                is_running: false,
+                is_dir: false,
+            }],
+            OutputFormat::Toml,
+            &CliConfig::default(),
+        );
+        let value: toml::Value = toml::from_str(&output).unwrap();
+        assert_eq!(value["app"][0]["file"].as_str(), Some("C:\\line\nnext"));
+        assert_eq!(value["app"][0]["app_type"].as_str(), Some("C\"EF"));
     }
 }
