@@ -42,7 +42,6 @@ _cefdetector() {
         "${global_options[@]}" \
         '(-h --help)'{-h,--help}'[Print help information]' \
         '(-V --version)'{-V,--version}'[Print version information]' \
-        '--system-font[Use platform system fonts instead of embedded fonts]' \
         '1:command:((cli\:"Run the command-line scanner" config\:"Inspect and validate configuration"))'
 }
 

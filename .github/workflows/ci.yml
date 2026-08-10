@@ -81,7 +81,7 @@ jobs:
           xvfb-run --auto-servernum env \
             CEFDETECTOR_GUI_SMOKE_TEST=1 \
             LIBGL_ALWAYS_SOFTWARE=1 \
-            target/release/cefdetector --system-font
+            target/release/cefdetector --set 'gui.fonts.mode="system"'
 
   windows:
     name: Windows
@@ -137,7 +137,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "GUI startup test exited with code $LASTEXITCODE"
           }
-          & target/release/cefdetector.exe --system-font
+          & target/release/cefdetector.exe --set 'gui.fonts.mode="system"'
           if ($LASTEXITCODE -ne 0) {
             throw "System-font GUI startup test exited with code $LASTEXITCODE"
           }
@@ -219,4 +219,4 @@ jobs:
           CEFDETECTOR_GUI_SMOKE_TEST: "1"
         run: |
           target/release/cefdetector
-          target/release/cefdetector --system-font
+          target/release/cefdetector --set 'gui.fonts.mode="system"'

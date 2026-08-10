@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -18,8 +18,6 @@ use glutin::display::Display;
 use glutin::surface::{Surface, WindowSurface};
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
-#[cfg(not(target_os = "macos"))]
-use std::path::PathBuf;
 use winit::raw_window_handle::HasWindowHandle as _;
 
 #[cfg(target_os = "linux")]
@@ -1165,44 +1163,58 @@ fn configure_custom_fonts(
     ctx: &egui::Context,
     config: &crate::config::FontConfig,
 ) -> Result<EguiFonts, GuiError> {
-    let faces = [
-        ("title", &config.title),
-        ("card-regular", &config.card_regular),
-        ("card-bold", &config.card_bold),
-        ("footer", &config.footer),
+    let roles = [
+        ("title", config.title.as_slice()),
+        ("card-regular", config.card_regular.as_slice()),
+        ("card-bold", config.card_bold.as_slice()),
+        ("footer", config.footer.as_slice()),
     ];
     let mut definitions = FontDefinitions::empty();
     let mut families = Vec::new();
-    for (name, face) in faces {
-        let path = face.path.as_ref().ok_or_else(|| {
-            GuiError(format!(
-                "custom font {name} has no path after configuration validation"
-            ))
-        })?;
-        let bytes = std::fs::read(path).map_err(|error| {
-            GuiError(format!(
-                "failed to read custom font {}: {error}",
-                path.display()
-            ))
-        })?;
-        let data_name = format!("cefdetector-custom-{name}");
-        let family = FontFamily::Name(data_name.clone().into());
-        let mut data = FontData::from_owned(bytes);
-        data.index = face.index;
-        definitions
-            .font_data
-            .insert(data_name.clone(), Arc::new(data));
-        definitions.families.insert(family.clone(), vec![data_name]);
+    let mut proportional_fallback = Vec::new();
+    let mut loaded_fonts: HashMap<(PathBuf, u32), String> = HashMap::new();
+    for (role, chain) in roles {
+        let family = FontFamily::Name(format!("cefdetector-custom-{role}").into());
+        let mut data_names = Vec::new();
+        for (index, face) in chain.iter().enumerate() {
+            let path = face.path.as_ref().ok_or_else(|| {
+                GuiError(format!(
+                    "custom font {role}[{index}] has no path after configuration validation"
+                ))
+            })?;
+            let key = (path.clone(), face.index);
+            let data_name = if let Some(data_name) = loaded_fonts.get(&key) {
+                data_name.clone()
+            } else {
+                let bytes = std::fs::read(path).map_err(|error| {
+                    GuiError(format!(
+                        "failed to read custom font {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                let data_name = format!("cefdetector-custom-font-{}", loaded_fonts.len());
+                let mut data = FontData::from_owned(bytes);
+                data.index = face.index;
+                definitions
+                    .font_data
+                    .insert(data_name.clone(), Arc::new(data));
+                loaded_fonts.insert(key, data_name.clone());
+                data_name
+            };
+            data_names.push(data_name);
+        }
+        if role == "card-regular" {
+            proportional_fallback.clone_from(&data_names);
+        }
+        definitions.families.insert(family.clone(), data_names);
         families.push(family);
     }
-    definitions.families.insert(
-        FontFamily::Proportional,
-        vec!["cefdetector-custom-card-regular".into()],
-    );
-    definitions.families.insert(
-        FontFamily::Monospace,
-        vec!["cefdetector-custom-card-regular".into()],
-    );
+    definitions
+        .families
+        .insert(FontFamily::Proportional, proportional_fallback.clone());
+    definitions
+        .families
+        .insert(FontFamily::Monospace, proportional_fallback);
     ctx.set_fonts(definitions);
 
     Ok(EguiFonts {

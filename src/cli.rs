@@ -1,8 +1,6 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-#[cfg(feature = "gui")]
-use crate::config::FontMode;
 use crate::config::{self, AppConfig, CliConfig, LoadOptions, SortKey, SortOrder};
 use crate::models::AppInfo;
 use crate::search::core_search;
@@ -12,12 +10,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone, Debug, PartialEq)]
 pub struct GuiOptions {
     pub config: AppConfig,
-}
-
-#[cfg(feature = "gui")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct GuiCliOptions {
-    system_font: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +33,7 @@ enum Action {
     RunCli(CliOptions),
     Config(ConfigCommand),
     #[cfg(feature = "gui")]
-    LaunchGui(GuiCliOptions),
+    LaunchGui,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -57,29 +49,23 @@ fn print_root_help() {
     println!();
     #[cfg(feature = "gui")]
     println!(
-        "Usage: cefdetector [GLOBAL OPTIONS] [GUI OPTIONS]\n       cefdetector [GLOBAL OPTIONS] cli [CLI OPTIONS]\n       cefdetector [GLOBAL OPTIONS] config <COMMAND>"
+        "Usage: cefdetector [OPTIONS]\n       cefdetector [OPTIONS] cli [CLI OPTIONS]\n       cefdetector [OPTIONS] config <COMMAND>"
     );
     #[cfg(not(feature = "gui"))]
-    println!("Usage: cefdetector <COMMAND>");
+    println!("Usage: cefdetector [OPTIONS] <COMMAND>");
     println!();
     println!("Commands:");
     println!("  cli    Run the command-line scanner");
     println!("  config Inspect and validate configuration");
     println!();
-    println!("Global options:");
+    println!("Options:");
     println!("      --config <FILE>       Load an additional configuration file");
     println!("      --no-system-config    Do not load the system configuration");
     println!("      --no-user-config      Do not load the user configuration");
     println!("      --set <KEY=VALUE>     Override a configuration value using TOML syntax");
     println!();
-    #[cfg(feature = "gui")]
-    println!("GUI options:");
-    #[cfg(not(feature = "gui"))]
-    println!("Options:");
     println!("  -h, --help         Print help information");
     println!("  -V, --version      Print version information");
-    #[cfg(feature = "gui")]
-    println!("      --system-font  Use platform system fonts instead of embedded fonts");
 }
 
 fn print_cli_help() {
@@ -99,7 +85,7 @@ fn print_cli_help() {
 fn print_config_help() {
     println!("CEF Detector {}", VERSION);
     println!();
-    println!("Usage: cefdetector [GLOBAL OPTIONS] config <COMMAND>");
+    println!("Usage: cefdetector [OPTIONS] config <COMMAND>");
     println!();
     println!("Commands:");
     println!("  paths            Print automatic configuration paths");
@@ -120,22 +106,18 @@ fn parse_arguments(args: &[String]) -> Result<Action, String> {
 
 #[cfg(feature = "gui")]
 fn parse_gui_arguments(args: &[String]) -> Result<Action, String> {
-    let mut options = GuiCliOptions::default();
-
-    for arg in args {
+    if let Some(arg) = args
+        .iter()
+        .find(|arg| !(cfg!(target_os = "macos") && arg.starts_with("-psn_")))
+    {
         match arg.as_str() {
             "--help" | "-h" => return Ok(Action::RootHelp),
             "--version" | "-V" => return Ok(Action::Version),
-            "--system-font" => options.system_font = true,
-            #[cfg(target_os = "macos")]
-            arg if arg.starts_with("-psn_") => {
-                // Finder may append a process serial number when launching an app bundle.
-            }
-            _ => return Err(format!("unknown GUI option: {arg}")),
+            _ => return Err(format!("unknown option or command: {arg}")),
         }
     }
 
-    Ok(Action::LaunchGui(options))
+    Ok(Action::LaunchGui)
 }
 
 #[cfg(not(feature = "gui"))]
@@ -147,7 +129,7 @@ fn parse_gui_arguments(args: &[String]) -> Result<Action, String> {
     match arg.as_str() {
         "--help" | "-h" => Ok(Action::RootHelp),
         "--version" | "-V" => Ok(Action::Version),
-        _ => Err(format!("unknown GUI option: {arg}")),
+        _ => Err(format!("unknown option or command: {arg}")),
     }
 }
 
@@ -203,7 +185,7 @@ fn parse_config_arguments(args: &[String]) -> Result<Action, String> {
     Ok(Action::Config(command))
 }
 
-fn extract_global_options(args: &[String]) -> Result<(Vec<String>, LoadOptions), String> {
+fn extract_config_options(args: &[String]) -> Result<(Vec<String>, LoadOptions), String> {
     let mut command_args = Vec::new();
     let mut options = LoadOptions::default();
     let mut index = 0;
@@ -436,7 +418,7 @@ fn run_cli(config: &AppConfig, options: CliOptions) -> Result<(), String> {
 fn load_config(options: &LoadOptions) -> AppConfig {
     config::load(options)
         .unwrap_or_else(|error| {
-            eprintln!("Error: {error}");
+            eprintln!("{error}");
             std::process::exit(2);
         })
         .config
@@ -466,11 +448,11 @@ fn handle_config_command(command: ConfigCommand, options: &LoadOptions) {
         ConfigCommand::Paths => print_config_paths(),
         ConfigCommand::Show => {
             let loaded = config::load(options).unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
+                eprintln!("{error}");
                 std::process::exit(2);
             });
             let output = config::format_effective(&loaded).unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
+                eprintln!("{error}");
                 std::process::exit(1);
             });
             print!("{output}");
@@ -486,7 +468,7 @@ fn handle_config_command(command: ConfigCommand, options: &LoadOptions) {
                 },
             );
             let loaded = config::load(&validation_options).unwrap_or_else(|error| {
-                eprintln!("Error: {error}");
+                eprintln!("{error}");
                 std::process::exit(2);
             });
             println!(
@@ -499,7 +481,7 @@ fn handle_config_command(command: ConfigCommand, options: &LoadOptions) {
 
 pub fn handle_arguments() -> Option<GuiOptions> {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    let (args, load_options) = extract_global_options(&raw_args).unwrap_or_else(|error| {
+    let (args, load_options) = extract_config_options(&raw_args).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         eprintln!("Run 'cefdetector --help' for usage information.");
         std::process::exit(2);
@@ -530,12 +512,10 @@ pub fn handle_arguments() -> Option<GuiOptions> {
         }
         Action::Config(command) => handle_config_command(command, &load_options),
         #[cfg(feature = "gui")]
-        Action::LaunchGui(options) => {
-            let mut config = load_config(&load_options);
-            if options.system_font {
-                config.gui.fonts.mode = FontMode::System;
-            }
-            return Some(GuiOptions { config });
+        Action::LaunchGui => {
+            return Some(GuiOptions {
+                config: load_config(&load_options),
+            });
         }
     }
 
@@ -544,10 +524,8 @@ pub fn handle_arguments() -> Option<GuiOptions> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "gui")]
-    use super::GuiCliOptions;
     use super::{
-        Action, CliOptions, ConfigCommand, OutputFormat, extract_global_options, format_json,
+        Action, CliOptions, ConfigCommand, OutputFormat, extract_config_options, format_json,
         format_results, parse_arguments, push_json_string,
     };
     use crate::config::CliConfig;
@@ -573,30 +551,14 @@ mod tests {
         );
         assert_eq!(
             parse_arguments(&args(&["--json"])),
-            Err("unknown GUI option: --json".into())
-        );
-    }
-
-    #[cfg(feature = "gui")]
-    #[test]
-    fn root_arguments_only_configure_the_gui() {
-        assert_eq!(
-            parse_arguments(&args(&["--system-font"])),
-            Ok(Action::LaunchGui(GuiCliOptions { system_font: true }))
-        );
-        assert_eq!(
-            parse_arguments(&args(&["cli", "--system-font"])),
-            Err("unknown CLI option: --system-font".into())
+            Err("unknown option or command: --json".into())
         );
     }
 
     #[cfg(feature = "gui")]
     #[test]
     fn no_arguments_launches_the_gui() {
-        assert_eq!(
-            parse_arguments(&[]),
-            Ok(Action::LaunchGui(GuiCliOptions::default()))
-        );
+        assert_eq!(parse_arguments(&[]), Ok(Action::LaunchGui));
     }
 
     #[cfg(not(feature = "gui"))]
@@ -606,8 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn global_config_options_are_removed_without_mixing_subcommand_options() {
-        let (command, options) = extract_global_options(&args(&[
+    fn config_options_are_removed_without_mixing_subcommand_options() {
+        let (command, options) = extract_config_options(&args(&[
             "--no-system-config",
             "cli",
             "--config",

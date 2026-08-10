@@ -4,8 +4,6 @@ complete -c cefdetector -n "$cefdetector_no_command" -f -a cli -d "Run the comma
 complete -c cefdetector -n "$cefdetector_no_command" -f -a config -d "Inspect and validate configuration"
 complete -c cefdetector -n "$cefdetector_no_command" -s h -l help -d "Print help information"
 complete -c cefdetector -n "$cefdetector_no_command" -s V -l version -d "Print version information"
-complete -c cefdetector -n "$cefdetector_no_command" -l system-font -d "Use platform system fonts instead of embedded fonts"
-
 complete -c cefdetector -l config -r -F -d "Load an additional configuration file"
 complete -c cefdetector -l no-system-config -d "Do not load the system configuration"
 complete -c cefdetector -l no-user-config -d "Do not load the user configuration"

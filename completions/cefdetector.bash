@@ -30,7 +30,7 @@ _cefdetector() {
             opts="paths show validate -h --help --config --no-system-config --no-user-config --set"
             ;;
         *)
-            opts="cli config -h --help -V --version --system-font --config --no-system-config --no-user-config --set"
+            opts="cli config -h --help -V --version --config --no-system-config --no-user-config --set"
             ;;
     esac
 

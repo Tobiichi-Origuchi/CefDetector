@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -19,11 +19,179 @@ impl ConfigError {
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        if self.0.starts_with("error:") {
+            formatter.write_str(&self.0)
+        } else {
+            write!(formatter, "error: {}", self.0)
+        }
     }
 }
 
 impl std::error::Error for ConfigError {}
+
+fn toml_error_help(message: &str) -> &'static str {
+    if message.contains("unknown field") {
+        "remove the unsupported field or compare its name with config.toml.example"
+    } else if message.contains("unknown variant") {
+        "choose one of the allowed values listed in the reason above"
+    } else if message.contains("invalid type") {
+        "use the value type shown for this field in config.toml.example"
+    } else if message.contains("missing field") {
+        "add the required field at the location shown above"
+    } else {
+        "check TOML quoting, brackets, commas, and key/value separators near this location"
+    }
+}
+
+fn render_source_diagnostic(
+    summary: &str,
+    path: &Path,
+    content: &str,
+    span: Option<std::ops::Range<usize>>,
+    reason: &str,
+    help: &str,
+) -> ConfigError {
+    let mut output = format!("error: {summary}");
+    if let Some(span) = span {
+        let mut start = span.start.min(content.len());
+        while !content.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = span
+            .end
+            .max(start + usize::from(start < content.len()))
+            .min(content.len());
+        while !content.is_char_boundary(end) {
+            end += 1;
+        }
+        let line_start = content[..start].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = content[start..]
+            .find('\n')
+            .map_or(content.len(), |index| start + index);
+        let line_number = content[..line_start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
+        let column = content[line_start..start].chars().count() + 1;
+        let line = &content[line_start..line_end];
+        let underline_end = end.min(line_end);
+        let underline_width = content[start..underline_end].chars().count().max(1);
+        let gutter = line_number.to_string().len();
+        output.push_str(&format!(
+            "\n --> {}:{line_number}:{column}\n{space:>gutter$} |\n{line_number:>gutter$} | {line}\n{space:>gutter$} | {padding}{carets}",
+            path.display(),
+            space = "",
+            padding = " ".repeat(column.saturating_sub(1)),
+            carets = "^".repeat(underline_width),
+        ));
+    } else {
+        output.push_str(&format!("\n --> {}", path.display()));
+    }
+    output.push_str(&format!("\n  |\n  = reason: {reason}\n  = help: {help}"));
+    ConfigError(output)
+}
+
+fn render_toml_diagnostic(
+    kind: ConfigSourceKind,
+    path: &Path,
+    content: &str,
+    error: &toml::de::Error,
+) -> ConfigError {
+    render_source_diagnostic(
+        &format!("invalid {kind} configuration"),
+        path,
+        content,
+        error.span(),
+        error.message(),
+        toml_error_help(error.message()),
+    )
+}
+
+fn extract_validation_key(reason: &str) -> Option<&str> {
+    const ROOTS: [&str; 6] = ["version", "search", "gui", "icons", "cli", "diagnostics"];
+    reason.split_whitespace().find_map(|word| {
+        let word = word.trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.' | '[' | ']')
+        });
+        ROOTS
+            .iter()
+            .any(|root| word == *root || word.starts_with(&format!("{root}.")))
+            .then_some(word)
+    })
+}
+
+fn strip_index(component: &str) -> &str {
+    component
+        .split_once('[')
+        .map_or(component, |(name, _)| name)
+}
+
+fn locate_validation_key(content: &str, dotted_key: &str) -> Option<std::ops::Range<usize>> {
+    let components: Vec<_> = dotted_key.split('.').collect();
+    for index in (0..components.len()).rev() {
+        let key = strip_index(components[index]);
+        let expected_section = components[..index]
+            .iter()
+            .map(|component| strip_index(component))
+            .collect::<Vec<_>>()
+            .join(".");
+        let mut section = String::new();
+        let mut offset = 0;
+        for line in content.split_inclusive('\n') {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                section = trimmed.trim_matches(['[', ']']).trim().to_owned();
+            } else if section == expected_section
+                && let Some(rest) = trimmed.strip_prefix(key)
+                && rest.trim_start().starts_with('=')
+            {
+                let leading = line.len() - line.trim_start().len();
+                return Some(offset + leading..offset + leading + key.len());
+            }
+            offset += line.len();
+        }
+    }
+    None
+}
+
+fn validation_help(reason: &str) -> &'static str {
+    if reason.contains("unknown variant") {
+        "choose one of the allowed values listed in the reason above"
+    } else if reason.contains("unknown field") {
+        "remove the unsupported field or compare its name with config.toml.example"
+    } else if reason.contains("font") && reason.contains("index") {
+        "use an index that exists in this TTF/OTF/TTC/OTC file"
+    } else if reason.contains("font") || reason.contains("background") || reason.contains("icon") {
+        "use an absolute path to a readable, supported file"
+    } else if reason.contains("absolute") {
+        "replace the relative path with a complete absolute path"
+    } else if reason.contains("between") || reason.contains("must be") {
+        "choose a value within the stated valid range"
+    } else if reason.contains("custom mode") {
+        "provide a nonempty ordered font-face list for every text role"
+    } else {
+        "correct this value and run `cefdetector config validate` again"
+    }
+}
+
+fn render_validation_diagnostic(
+    kind: ConfigSourceKind,
+    path: &Path,
+    content: &str,
+    error: &ConfigError,
+) -> ConfigError {
+    let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
+    let span = extract_validation_key(reason).and_then(|key| locate_validation_key(content, key));
+    render_source_diagnostic(
+        &format!("unusable {kind} configuration"),
+        path,
+        content,
+        span,
+        reason,
+        validation_help(reason),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RgbaColor([u8; 4]);
@@ -546,20 +714,20 @@ impl Default for SizeFormatConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FontConfig {
     pub mode: FontMode,
-    pub title: FontFaceConfig,
-    pub card_regular: FontFaceConfig,
-    pub card_bold: FontFaceConfig,
-    pub footer: FontFaceConfig,
+    pub title: Vec<FontFaceConfig>,
+    pub card_regular: Vec<FontFaceConfig>,
+    pub card_bold: Vec<FontFaceConfig>,
+    pub footer: Vec<FontFaceConfig>,
 }
 
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
             mode: FontMode::Embedded,
-            title: FontFaceConfig::default(),
-            card_regular: FontFaceConfig::default(),
-            card_bold: FontFaceConfig::default(),
-            footer: FontFaceConfig::default(),
+            title: Vec::new(),
+            card_regular: Vec::new(),
+            card_bold: Vec::new(),
+            footer: Vec::new(),
         }
     }
 }
@@ -779,13 +947,392 @@ impl AppConfig {
     }
 }
 
+fn validate_readable_file(name: &str, path: &Path) -> Result<std::fs::File, ConfigError> {
+    require_absolute(name, path)?;
+    let file = std::fs::File::open(path).map_err(|error| {
+        ConfigError::new(format!("{name} cannot open {}: {error}", path.display()))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        ConfigError::new(format!("{name} cannot inspect {}: {error}", path.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(ConfigError::new(format!(
+            "{name} must point to a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn validate_readable_directory(name: &str, path: &Path) -> Result<(), ConfigError> {
+    require_absolute(name, path)?;
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        ConfigError::new(format!("{name} cannot inspect {}: {error}", path.display()))
+    })?;
+    if !metadata.is_dir() {
+        return Err(ConfigError::new(format!(
+            "{name} must point to a directory: {}",
+            path.display()
+        )));
+    }
+    std::fs::read_dir(path).map_err(|error| {
+        ConfigError::new(format!(
+            "{name} cannot read directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn read_prefix(name: &str, path: &Path, maximum: u64) -> Result<Vec<u8>, ConfigError> {
+    let file = validate_readable_file(name, path)?;
+    let mut bytes = Vec::new();
+    file.take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            ConfigError::new(format!("{name} cannot read {}: {error}", path.display()))
+        })?;
+    if bytes.len() as u64 > maximum {
+        return Err(ConfigError::new(format!(
+            "{name} file {} exceeds the {} MiB safety limit",
+            path.display(),
+            maximum / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
+}
+
+fn validate_image_file(name: &str, path: &Path, icon_formats: bool) -> Result<(), ConfigError> {
+    const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+    let bytes = read_prefix(name, path, MAX_IMAGE_BYTES)?;
+    let extension = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let recognized = match extension.as_str() {
+        "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "ico" => bytes.starts_with(&[0, 0, 1, 0]),
+        "webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+        "svg" => {
+            icon_formats
+                && std::str::from_utf8(&bytes).is_ok()
+                && bytes[..bytes.len().min(4096)]
+                    .windows(4)
+                    .any(|window| window == b"<svg")
+        }
+        #[cfg(target_os = "macos")]
+        "icns" => icon_formats && bytes.starts_with(b"icns"),
+        _ => false,
+    };
+    if !recognized {
+        return Err(ConfigError::new(format!(
+            "{name} is not a supported PNG, ICO, or WebP{} file: {}",
+            if icon_formats {
+                if cfg!(target_os = "macos") {
+                    ", SVG, or ICNS"
+                } else {
+                    ", or SVG"
+                }
+            } else {
+                ""
+            },
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn big_endian_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(
+        bytes.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn big_endian_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(
+        bytes.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn read_font_range(
+    file: &mut std::fs::File,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, String> {
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| format!("cannot seek to font offset {offset}: {error}"))?;
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes)
+        .map_err(|error| format!("cannot read font data at offset {offset}: {error}"))?;
+    Ok(bytes)
+}
+
+fn validate_sfnt(file: &mut std::fs::File, file_length: u64, offset: u64) -> Result<(), String> {
+    let header = read_font_range(file, offset, 12)?;
+    let signature = &header[..4];
+    if !matches!(signature, b"\0\x01\0\0" | b"OTTO" | b"true" | b"typ1") {
+        return Err("unsupported SFNT signature".into());
+    }
+    let table_count = usize::from(
+        big_endian_u16(&header, 4).ok_or_else(|| "truncated SFNT table count".to_owned())?,
+    );
+    if table_count == 0 || table_count > 4096 {
+        return Err("invalid SFNT table count".into());
+    }
+    let directory_length = table_count
+        .checked_mul(16)
+        .ok_or_else(|| "SFNT table directory overflow".to_owned())?;
+    let directory_offset = offset
+        .checked_add(12)
+        .ok_or_else(|| "SFNT table directory overflow".to_owned())?;
+    let directory_end = directory_offset
+        .checked_add(directory_length as u64)
+        .ok_or_else(|| "SFNT table directory overflow".to_owned())?;
+    if directory_end > file_length {
+        return Err("truncated SFNT table directory".into());
+    }
+    let directory = read_font_range(file, directory_offset, directory_length)?;
+
+    let mut has_cmap = false;
+    let mut has_head = false;
+    let mut has_glyph_data = false;
+    for index in 0..table_count {
+        let record = index * 16;
+        let tag = directory
+            .get(record..record + 4)
+            .ok_or_else(|| "truncated SFNT table record".to_owned())?;
+        let table_offset = u64::from(
+            big_endian_u32(&directory, record + 8)
+                .ok_or_else(|| "truncated SFNT table offset".to_owned())?,
+        );
+        let table_length = u64::from(
+            big_endian_u32(&directory, record + 12)
+                .ok_or_else(|| "truncated SFNT table length".to_owned())?,
+        );
+        let table_end = table_offset
+            .checked_add(table_length)
+            .ok_or_else(|| "SFNT table range overflow".to_owned())?;
+        if table_end > file_length {
+            return Err("SFNT table extends beyond the font file".into());
+        }
+        has_cmap |= tag == b"cmap" && table_length > 0;
+        has_head |= tag == b"head" && table_length > 0;
+        has_glyph_data |=
+            matches!(tag, b"glyf" | b"CFF " | b"CFF2" | b"CBDT" | b"sbix") && table_length > 0;
+    }
+    if !has_cmap {
+        return Err("font has no nonempty cmap table".into());
+    }
+    if !has_head {
+        return Err("font has no nonempty head table".into());
+    }
+    if !has_glyph_data {
+        return Err("font has no supported glyph-data table".into());
+    }
+    Ok(())
+}
+
+fn validate_font_face(name: &str, face: &FontFaceConfig) -> Result<(), ConfigError> {
+    const MAX_FONT_BYTES: u64 = 256 * 1024 * 1024;
+    let path = face
+        .path
+        .as_deref()
+        .ok_or_else(|| ConfigError::new(format!("{name}.path is required")))?;
+    let mut file = validate_readable_file(name, path)?;
+    let file_length = file
+        .metadata()
+        .map_err(|error| {
+            ConfigError::new(format!("{name} cannot inspect {}: {error}", path.display()))
+        })?
+        .len();
+    if file_length > MAX_FONT_BYTES {
+        return Err(ConfigError::new(format!(
+            "{name} file {} exceeds the {} MiB safety limit",
+            path.display(),
+            MAX_FONT_BYTES / (1024 * 1024)
+        )));
+    }
+    let header = read_font_range(&mut file, 0, 12).map_err(|reason| {
+        ConfigError::new(format!("{name} has an unreadable font header: {reason}"))
+    })?;
+    let font_offset = if header.starts_with(b"ttcf") {
+        let count = big_endian_u32(&header, 8)
+            .ok_or_else(|| ConfigError::new(format!("{name} has a truncated TTC/OTC header")))?;
+        if face.index >= count {
+            return Err(ConfigError::new(format!(
+                "{name}.index {} does not exist in {} (available indexes: 0..{})",
+                face.index,
+                path.display(),
+                count.saturating_sub(1)
+            )));
+        }
+        let index_offset = 12_usize
+            .checked_add(face.index as usize * 4)
+            .ok_or_else(|| ConfigError::new(format!("{name}.index overflows the TTC header")))?;
+        let offset = read_font_range(&mut file, index_offset as u64, 4).map_err(|reason| {
+            ConfigError::new(format!(
+                "{name} has a truncated TTC/OTC offset table: {reason}"
+            ))
+        })?;
+        u64::from(big_endian_u32(&offset, 0).expect("four bytes contain one u32"))
+    } else {
+        if face.index != 0 {
+            return Err(ConfigError::new(format!(
+                "{name}.index must be 0 for a single-font TTF/OTF file"
+            )));
+        }
+        0
+    };
+    validate_sfnt(&mut file, file_length, font_offset).map_err(|reason| {
+        ConfigError::new(format!(
+            "{name} is not a usable TTF/OTF/TTC/OTC font at index {}: {reason} ({})",
+            face.index,
+            path.display()
+        ))
+    })
+}
+
+#[cfg(all(feature = "index", any(target_os = "linux", target_os = "macos")))]
+fn resolve_command(command: &Path) -> Option<PathBuf> {
+    if command.is_absolute() || command.components().count() > 1 {
+        return command.is_file().then(|| command.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(target_os = "windows")]
+        for extension in ["exe", "com", "bat", "cmd"] {
+            let candidate = candidate.with_extension(extension);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(feature = "index", any(target_os = "linux", target_os = "macos")))]
+fn validate_command(name: &str, command: &Path) -> Result<(), ConfigError> {
+    let path = resolve_command(command).ok_or_else(|| {
+        ConfigError::new(format!(
+            "{name} cannot find executable {:?} in PATH",
+            command
+        ))
+    })?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if std::fs::metadata(&path)
+            .map_err(|error| {
+                ConfigError::new(format!("{name} cannot inspect {}: {error}", path.display()))
+            })?
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Err(ConfigError::new(format!(
+                "{name} is not executable: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_system_fonts() -> Result<(), ConfigError> {
+    #[cfg(target_os = "linux")]
+    {
+        for (role, pattern) in [("regular", "sans-serif"), ("bold", "sans-serif:style=bold")] {
+            let output = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}\n%{index}\n", pattern])
+                .output()
+                .map_err(|error| {
+                    ConfigError::new(format!(
+                        "gui.fonts.mode=\"system\" cannot run fc-match: {error}"
+                    ))
+                })?;
+            let output_text = String::from_utf8_lossy(&output.stdout);
+            let mut lines = output_text.lines();
+            let path = PathBuf::from(lines.next().unwrap_or_default());
+            let index = lines
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            if !output.status.success() || !path.is_file() {
+                return Err(ConfigError::new(format!(
+                    "gui.fonts.mode=\"system\" could not find a usable {role} sans-serif font"
+                )));
+            }
+            validate_font_face(
+                &format!("gui.fonts.mode=\"system\" {role} font"),
+                &FontFaceConfig {
+                    path: Some(path),
+                    index,
+                },
+            )?;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let windows = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let fonts = windows.join("Fonts");
+        for (role, names) in [
+            (
+                "regular",
+                &[
+                    "segoeui.ttf",
+                    "msyh.ttc",
+                    "msjh.ttc",
+                    "malgun.ttf",
+                    "meiryo.ttc",
+                ][..],
+            ),
+            (
+                "bold",
+                &[
+                    "segoeuib.ttf",
+                    "msyhbd.ttc",
+                    "msjhbd.ttc",
+                    "malgunbd.ttf",
+                    "meiryob.ttc",
+                ][..],
+            ),
+        ] {
+            let path = names
+                .iter()
+                .map(|name| fonts.join(name))
+                .find(|path| path.is_file())
+                .ok_or_else(|| {
+                    ConfigError::new(format!(
+                        "gui.fonts.mode=\"system\" could not find a usable {role} Windows sans-serif font"
+                    ))
+                })?;
+            validate_font_face(
+                &format!("gui.fonts.mode=\"system\" {role} font"),
+                &FontFaceConfig {
+                    path: Some(path),
+                    index: 0,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_search(config: &SearchConfig) -> Result<(), ConfigError> {
     if let Some(roots) = &config.roots {
         if roots.is_empty() {
             return Err(ConfigError::new("search.roots cannot be empty"));
         }
         for root in roots {
-            require_absolute("search.roots", root)?;
+            validate_readable_directory("search.roots", root)?;
         }
     }
     for path in &config.exclude_paths {
@@ -817,6 +1364,19 @@ fn validate_search(config: &SearchConfig) -> Result<(), ConfigError> {
     {
         return Err(ConfigError::new("indexed backend commands cannot be empty"));
     }
+    if config.backend == SearchBackend::Index && !cfg!(feature = "index") {
+        return Err(ConfigError::new(
+            "search.backend=\"index\" requires a binary compiled with the index feature",
+        ));
+    }
+    #[cfg(all(feature = "index", target_os = "linux"))]
+    if config.backend == SearchBackend::Index {
+        validate_command("search.plocate.command", &config.plocate.command)?;
+    }
+    #[cfg(all(feature = "index", target_os = "macos"))]
+    if config.backend == SearchBackend::Index {
+        validate_command("search.spotlight.command", &config.spotlight.command)?;
+    }
     Ok(())
 }
 
@@ -825,6 +1385,9 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
     finite_range("gui.window.height", config.window.height, 100.0, 16_384.0)?;
     if config.window.title.is_empty() {
         return Err(ConfigError::new("gui.window.title cannot be empty"));
+    }
+    if let Some(path) = &config.background.path {
+        validate_image_file("gui.background.path", path, false)?;
     }
 
     normalized("gui.status.x", config.status.x)?;
@@ -984,19 +1547,36 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
         ));
     }
 
-    if config.fonts.mode == FontMode::Custom {
-        for (name, face) in [
-            ("title", &config.fonts.title),
-            ("card_regular", &config.fonts.card_regular),
-            ("card_bold", &config.fonts.card_bold),
-            ("footer", &config.fonts.footer),
-        ] {
-            if face.path.is_none() {
-                return Err(ConfigError::new(format!(
-                    "gui.fonts.{name}.path is required in custom font mode"
-                )));
+    match config.fonts.mode {
+        FontMode::Embedded => {}
+        FontMode::System => validate_system_fonts()?,
+        FontMode::Custom => {
+            let mut validated = HashSet::new();
+            for (name, chain) in [
+                ("title", &config.fonts.title),
+                ("card_regular", &config.fonts.card_regular),
+                ("card_bold", &config.fonts.card_bold),
+                ("footer", &config.fonts.footer),
+            ] {
+                if chain.is_empty() {
+                    return Err(ConfigError::new(format!(
+                        "gui.fonts.{name} must contain at least one font face in custom mode"
+                    )));
+                }
+                for (index, face) in chain.iter().enumerate() {
+                    let key = (face.path.clone(), face.index);
+                    if validated.insert(key) {
+                        validate_font_face(&format!("gui.fonts.{name}[{index}]"), face)?;
+                    }
+                }
             }
         }
+    }
+    #[cfg(target_os = "macos")]
+    if config.graphics.api == GraphicsApi::Gles {
+        return Err(ConfigError::new(
+            "gui.graphics.api=\"gles\" is unavailable on macOS; use \"auto\" or \"opengl\"",
+        ));
     }
     Ok(())
 }
@@ -1029,6 +1609,19 @@ fn validate_icons(config: &IconConfig) -> Result<(), ConfigError> {
     }
     for name in &config.neighbor.names {
         validate_template("icons.neighbor.names", name, &["executable"])?;
+    }
+    if config.enabled
+        && config.sources.contains(&IconSource::Builtin)
+        && let Some(path) = &config.fallback_path
+    {
+        validate_image_file("icons.fallback_path", path, true)?;
+    }
+    #[cfg(target_os = "linux")]
+    if config.enabled && config.sources.contains(&IconSource::Desktop) && config.linux.desktop_files
+    {
+        for directory in &config.linux.theme_directories {
+            validate_readable_directory("icons.linux.theme_directories", directory)?;
+        }
     }
     Ok(())
 }
@@ -1241,7 +1834,18 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     for value in &options.overrides {
         let overlay = parse_override(value)?;
         merge_value(&mut effective, overlay);
-        structurally_validate(&effective, &format!("command-line override {value:?}"))?;
+        validate_effective(&effective).map_err(|error| {
+            let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
+            let key_length = value.find('=').unwrap_or(value.len());
+            render_source_diagnostic(
+                "unusable --set override",
+                Path::new("<command line>"),
+                value,
+                Some(0..key_length),
+                reason,
+                validation_help(reason),
+            )
+        })?;
     }
 
     let config: AppConfig = effective
@@ -1281,64 +1885,85 @@ fn load_file(
             return Ok(false);
         }
         Err(error) => {
-            return Err(ConfigError::new(format!(
-                "failed to open {kind} config {}: {error}",
-                path.display()
-            )));
+            return Err(render_source_diagnostic(
+                &format!("cannot load {kind} configuration"),
+                path,
+                "",
+                None,
+                &format!("failed to open the file: {error}"),
+                "verify that the path exists and that the file is readable",
+            ));
         }
     };
     let metadata = file.metadata().map_err(|error| {
-        ConfigError::new(format!(
-            "failed to inspect {kind} config {}: {error}",
-            path.display()
-        ))
+        render_source_diagnostic(
+            &format!("cannot load {kind} configuration"),
+            path,
+            "",
+            None,
+            &format!("failed to inspect the file: {error}"),
+            "verify that the path points to a readable regular file",
+        )
     })?;
     if metadata.len() > MAX_CONFIG_BYTES {
-        return Err(ConfigError::new(format!(
-            "{kind} config {} exceeds the 1 MiB safety limit",
-            path.display()
-        )));
+        return Err(render_source_diagnostic(
+            &format!("cannot load {kind} configuration"),
+            path,
+            "",
+            None,
+            "the file exceeds the 1 MiB safety limit",
+            "remove unrelated data or split the configuration into additional --config files",
+        ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            ConfigError::new(format!(
-                "failed to read {kind} config {}: {error}",
-                path.display()
-            ))
+            render_source_diagnostic(
+                &format!("cannot load {kind} configuration"),
+                path,
+                "",
+                None,
+                &format!("failed while reading the file: {error}"),
+                "verify that the file remains readable and try again",
+            )
         })?;
     if bytes.len() as u64 > MAX_CONFIG_BYTES {
-        return Err(ConfigError::new(format!(
-            "{kind} config {} exceeds the 1 MiB safety limit",
-            path.display()
-        )));
+        return Err(render_source_diagnostic(
+            &format!("cannot load {kind} configuration"),
+            path,
+            "",
+            None,
+            "the file exceeds the 1 MiB safety limit",
+            "remove unrelated data or split the configuration into additional --config files",
+        ));
     }
     let content = String::from_utf8(bytes).map_err(|error| {
-        ConfigError::new(format!(
-            "{kind} config {} is not valid UTF-8: {error}",
-            path.display()
-        ))
+        render_source_diagnostic(
+            &format!("cannot parse {kind} configuration"),
+            path,
+            "",
+            None,
+            &format!("the file is not valid UTF-8: {error}"),
+            "save the TOML file as UTF-8 without binary data",
+        )
     })?;
-    let overlay: toml::Value = toml::from_str(&content).map_err(|error| {
-        ConfigError::new(format!(
-            "failed to parse {kind} config {}: {error}",
-            path.display()
-        ))
-    })?;
+    let _: AppConfig = toml::from_str(&content)
+        .map_err(|error| render_toml_diagnostic(kind, path, &content, &error))?;
+    let overlay: toml::Value = toml::from_str(&content)
+        .map_err(|error| render_toml_diagnostic(kind, path, &content, &error))?;
     merge_value(effective, overlay);
-    structurally_validate(effective, &format!("{kind} config {}", path.display()))?;
+    validate_effective(effective)
+        .map_err(|error| render_validation_diagnostic(kind, path, &content, &error))?;
     Ok(true)
 }
 
-fn structurally_validate(value: &toml::Value, source: &str) -> Result<(), ConfigError> {
+fn validate_effective(value: &toml::Value) -> Result<(), ConfigError> {
     let config = value
         .clone()
         .try_into::<AppConfig>()
-        .map_err(|error| ConfigError::new(format!("invalid {source}: {error}")))?;
-    config
-        .validate()
-        .map_err(|error| ConfigError::new(format!("invalid {source}: {error}")))
+        .map_err(|error| ConfigError::new(format!("invalid configuration structure: {error}")))?;
+    config.validate()
 }
 
 fn merge_value(base: &mut toml::Value, overlay: toml::Value) {
@@ -1358,9 +1983,14 @@ fn merge_value(base: &mut toml::Value, overlay: toml::Value) {
 
 fn parse_override(input: &str) -> Result<toml::Value, ConfigError> {
     let (path, value) = input.split_once('=').ok_or_else(|| {
-        ConfigError::new(format!(
-            "invalid --set value {input:?}; expected dotted.key=TOML_VALUE"
-        ))
+        render_source_diagnostic(
+            "invalid --set override",
+            Path::new("<command line>"),
+            input,
+            Some(0..input.len()),
+            "the argument has no '=' separator",
+            "use the form --set dotted.key=TOML_VALUE",
+        )
     })?;
     let parts: Vec<_> = path.split('.').collect();
     if parts.is_empty()
@@ -1371,14 +2001,26 @@ fn parse_override(input: &str) -> Result<toml::Value, ConfigError> {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         })
     {
-        return Err(ConfigError::new(format!(
-            "invalid --set key {path:?}; use an unquoted dotted key"
-        )));
+        return Err(render_source_diagnostic(
+            "invalid --set override",
+            Path::new("<command line>"),
+            input,
+            Some(0..path.len()),
+            "the key is not a valid unquoted dotted TOML key",
+            "use letters, digits, underscores, hyphens, and dots between key components",
+        ));
     }
 
     let document = format!("value = {value}");
     let mut parsed: toml::Table = toml::from_str(&document).map_err(|error| {
-        ConfigError::new(format!("invalid TOML value in --set {input:?}: {error}"))
+        render_source_diagnostic(
+            &format!("invalid TOML value in --set {input:?}"),
+            Path::new("<command line>"),
+            input,
+            Some(path.len() + 1..input.len()),
+            error.message(),
+            toml_error_help(error.message()),
+        )
     })?;
     let value = parsed
         .remove("value")
@@ -1411,8 +2053,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        AppConfig, ConfigError, LoadOptions, RgbaColor, SearchBackend, config_paths,
-        format_effective, load, merge_value, parse_override,
+        AppConfig, ConfigError, FontFaceConfig, FontMode, LoadOptions, RgbaColor, SearchBackend,
+        config_paths, format_effective, load, merge_value, parse_override,
     };
 
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
@@ -1497,8 +2139,50 @@ mod tests {
             overrides: Vec::new(),
         })
         .unwrap_err();
-        assert!(error.to_string().contains(&config.0.display().to_string()));
-        assert!(error.to_string().contains("unknown"));
+        let message = error.to_string();
+        assert!(message.contains(&config.0.display().to_string()));
+        assert!(message.contains("unknown field"));
+        assert!(message.contains("2 | unknown = true"));
+        assert!(message.contains('^'));
+        assert!(message.contains("= help:"));
+    }
+
+    #[test]
+    fn toml_syntax_errors_include_source_location_and_help() {
+        let config = TempConfig::new("[search]\nbackend = [\n");
+        let error = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![config.0.clone()],
+            overrides: Vec::new(),
+        })
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("error: invalid explicit configuration"));
+        assert!(message.contains(&config.0.display().to_string()));
+        assert!(message.contains("2 | backend = ["));
+        assert!(message.contains("= reason:"));
+        assert!(message.contains("= help:"));
+    }
+
+    #[test]
+    fn invalid_enum_errors_list_every_allowed_value() {
+        let config = TempConfig::new("[search]\nbackend = 'fast'\n");
+        let error = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![config.0.clone()],
+            overrides: Vec::new(),
+        })
+        .unwrap_err();
+        let message = error.to_string();
+        for allowed in ["auto", "index", "filesystem"] {
+            assert!(
+                message.contains(allowed),
+                "missing {allowed:?} in {message}"
+            );
+        }
+        assert!(message.contains("choose one of the allowed values"));
     }
 
     #[test]
@@ -1510,7 +2194,10 @@ mod tests {
             overrides: Vec::new(),
         })
         .unwrap_err();
-        assert!(error.to_string().contains("failed to open explicit config"));
+        let message = error.to_string();
+        assert!(message.contains("cannot load explicit configuration"));
+        assert!(message.contains("failed to open the file"));
+        assert!(message.contains("verify that the path exists"));
     }
 
     #[test]
@@ -1523,8 +2210,11 @@ mod tests {
             overrides: Vec::new(),
         })
         .unwrap_err();
-        assert!(error.to_string().contains(&config.0.display().to_string()));
-        assert!(error.to_string().contains("gui.window.width"));
+        let message = error.to_string();
+        assert!(message.contains(&config.0.display().to_string()));
+        assert!(message.contains("gui.window.width"));
+        assert!(message.contains("2 | width = 1"));
+        assert!(message.contains("^^^^^"));
     }
 
     #[test]
@@ -1564,6 +2254,44 @@ mod tests {
     }
 
     #[test]
+    fn custom_font_chains_require_readable_valid_fonts() {
+        let font_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts/card-regular-subset.ttf");
+        let face = FontFaceConfig {
+            path: Some(font_path),
+            index: 0,
+        };
+        let mut config = AppConfig::default();
+        config.gui.fonts.mode = FontMode::Custom;
+        config.gui.fonts.title = vec![face.clone(), face.clone()];
+        config.gui.fonts.card_regular = vec![face.clone()];
+        config.gui.fonts.card_bold = vec![face.clone()];
+        config.gui.fonts.footer = vec![face];
+        assert!(config.validate().is_ok());
+
+        config.gui.fonts.title[1].index = 1;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("gui.fonts.title[1].index must be 0"));
+    }
+
+    #[test]
+    fn custom_font_chains_reject_non_font_files() {
+        let file = TempConfig::new("this is not a font");
+        let face = FontFaceConfig {
+            path: Some(file.0.clone()),
+            index: 0,
+        };
+        let mut config = AppConfig::default();
+        config.gui.fonts.mode = FontMode::Custom;
+        config.gui.fonts.title = vec![face.clone()];
+        config.gui.fonts.card_regular = vec![face.clone()];
+        config.gui.fonts.card_bold = vec![face.clone()];
+        config.gui.fonts.footer = vec![face];
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("not a usable TTF/OTF/TTC/OTC font"));
+    }
+
+    #[test]
     fn platform_paths_have_absolute_system_locations() {
         let paths = config_paths();
         assert!(
@@ -1583,6 +2311,6 @@ mod tests {
     #[test]
     fn error_is_a_standard_error() {
         let error: Box<dyn std::error::Error> = Box::new(ConfigError::new("test"));
-        assert_eq!(error.to_string(), "test");
+        assert_eq!(error.to_string(), "error: test");
     }
 }
