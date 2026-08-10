@@ -1,14 +1,23 @@
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
+#[cfg(feature = "gui")]
+use crate::config::FontMode;
+use crate::config::{self, AppConfig, LoadOptions};
 use crate::models::AppInfo;
 use crate::search::core_search;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GuiOptions {
-    #[cfg(feature = "gui")]
-    pub system_font: bool,
+    pub config: AppConfig,
+}
+
+#[cfg(feature = "gui")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GuiCliOptions {
+    system_font: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,20 +39,38 @@ enum Action {
     CliHelp,
     Version,
     RunCli(CliOptions),
+    Config(ConfigCommand),
     #[cfg(feature = "gui")]
-    LaunchGui(GuiOptions),
+    LaunchGui(GuiCliOptions),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigCommand {
+    Help,
+    Paths,
+    Show,
+    Validate(Option<PathBuf>),
 }
 
 fn print_root_help() {
     println!("CEF Detector {}", VERSION);
     println!();
     #[cfg(feature = "gui")]
-    println!("Usage: cefdetector [GUI OPTIONS]\n       cefdetector cli [CLI OPTIONS]");
+    println!(
+        "Usage: cefdetector [GLOBAL OPTIONS] [GUI OPTIONS]\n       cefdetector [GLOBAL OPTIONS] cli [CLI OPTIONS]\n       cefdetector [GLOBAL OPTIONS] config <COMMAND>"
+    );
     #[cfg(not(feature = "gui"))]
     println!("Usage: cefdetector <COMMAND>");
     println!();
     println!("Commands:");
     println!("  cli    Run the command-line scanner");
+    println!("  config Inspect and validate configuration");
+    println!();
+    println!("Global options:");
+    println!("      --config <FILE>       Load an additional configuration file");
+    println!("      --no-system-config    Do not load the system configuration");
+    println!("      --no-user-config      Do not load the user configuration");
+    println!("      --set <KEY=VALUE>     Override a configuration value using TOML syntax");
     println!();
     #[cfg(feature = "gui")]
     println!("GUI options:");
@@ -69,9 +96,23 @@ fn print_cli_help() {
     println!("  -O, --output <FILE>  Write results to a file instead of stdout");
 }
 
+fn print_config_help() {
+    println!("CEF Detector {}", VERSION);
+    println!();
+    println!("Usage: cefdetector [GLOBAL OPTIONS] config <COMMAND>");
+    println!();
+    println!("Commands:");
+    println!("  paths            Print automatic configuration paths");
+    println!("  show             Print the effective merged configuration");
+    println!("  validate [FILE]  Validate the effective configuration or one file");
+}
+
 fn parse_arguments(args: &[String]) -> Result<Action, String> {
     if args.first().is_some_and(|arg| arg == "cli") {
         return parse_cli_arguments(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "config") {
+        return parse_config_arguments(&args[1..]);
     }
 
     parse_gui_arguments(args)
@@ -79,7 +120,7 @@ fn parse_arguments(args: &[String]) -> Result<Action, String> {
 
 #[cfg(feature = "gui")]
 fn parse_gui_arguments(args: &[String]) -> Result<Action, String> {
-    let mut options = GuiOptions::default();
+    let mut options = GuiCliOptions::default();
 
     for arg in args {
         match arg.as_str() {
@@ -145,6 +186,64 @@ fn parse_cli_arguments(args: &[String]) -> Result<Action, String> {
         })),
         None => Ok(Action::CliHelp),
     }
+}
+
+fn parse_config_arguments(args: &[String]) -> Result<Action, String> {
+    let command = match args {
+        [] => ConfigCommand::Help,
+        [value] if matches!(value.as_str(), "-h" | "--help") => ConfigCommand::Help,
+        [command] if command == "paths" => ConfigCommand::Paths,
+        [command] if command == "show" => ConfigCommand::Show,
+        [command] if command == "validate" => ConfigCommand::Validate(None),
+        [command, path] if command == "validate" => {
+            ConfigCommand::Validate(Some(PathBuf::from(path)))
+        }
+        [command, ..] => return Err(format!("unknown config command or arguments: {command}")),
+    };
+    Ok(Action::Config(command))
+}
+
+fn extract_global_options(args: &[String]) -> Result<(Vec<String>, LoadOptions), String> {
+    let mut command_args = Vec::new();
+    let mut options = LoadOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                let Some(path) = args.get(index + 1) else {
+                    return Err("--config requires a file path".into());
+                };
+                options.explicit_files.push(PathBuf::from(path));
+                index += 1;
+            }
+            "--no-system-config" => options.no_system = true,
+            "--no-user-config" => options.no_user = true,
+            "--set" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("--set requires KEY=VALUE".into());
+                };
+                options.overrides.push(value.clone());
+                index += 1;
+            }
+            arg if arg.starts_with("--config=") => {
+                let path = arg.trim_start_matches("--config=");
+                if path.is_empty() {
+                    return Err("--config requires a file path".into());
+                }
+                options.explicit_files.push(PathBuf::from(path));
+            }
+            arg if arg.starts_with("--set=") => {
+                let value = arg.trim_start_matches("--set=");
+                if value.is_empty() {
+                    return Err("--set requires KEY=VALUE".into());
+                }
+                options.overrides.push(value.to_owned());
+            }
+            _ => command_args.push(args[index].clone()),
+        }
+        index += 1;
+    }
+    Ok((command_args, options))
 }
 
 fn push_json_string(output: &mut String, value: &str) {
@@ -237,10 +336,81 @@ fn run_cli(options: CliOptions) -> Result<(), String> {
     Ok(())
 }
 
+fn load_config(options: &LoadOptions) -> AppConfig {
+    config::load(options)
+        .unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            std::process::exit(2);
+        })
+        .config
+}
+
+fn print_config_paths() {
+    let paths = config::config_paths();
+    println!(
+        "system: {}",
+        paths
+            .system
+            .as_deref()
+            .map_or_else(|| "<unavailable>".into(), |path| path.display().to_string())
+    );
+    println!(
+        "user: {}",
+        paths
+            .user
+            .as_deref()
+            .map_or_else(|| "<unavailable>".into(), |path| path.display().to_string())
+    );
+}
+
+fn handle_config_command(command: ConfigCommand, options: &LoadOptions) {
+    match command {
+        ConfigCommand::Help => print_config_help(),
+        ConfigCommand::Paths => print_config_paths(),
+        ConfigCommand::Show => {
+            let loaded = config::load(options).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(2);
+            });
+            let output = config::format_effective(&loaded).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            });
+            print!("{output}");
+        }
+        ConfigCommand::Validate(path) => {
+            let validation_options = path.map_or_else(
+                || options.clone(),
+                |path| LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: vec![path],
+                    overrides: options.overrides.clone(),
+                },
+            );
+            let loaded = config::load(&validation_options).unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(2);
+            });
+            println!(
+                "Configuration is valid ({} file(s) loaded).",
+                loaded.sources.len()
+            );
+        }
+    }
+}
+
 pub fn handle_arguments() -> Option<GuiOptions> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let (args, load_options) = extract_global_options(&raw_args).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        eprintln!("Run 'cefdetector --help' for usage information.");
+        std::process::exit(2);
+    });
     let help_command = if args.first().is_some_and(|arg| arg == "cli") {
         "cefdetector cli --help"
+    } else if args.first().is_some_and(|arg| arg == "config") {
+        "cefdetector config --help"
     } else {
         "cefdetector --help"
     };
@@ -255,13 +425,21 @@ pub fn handle_arguments() -> Option<GuiOptions> {
         Action::CliHelp => print_cli_help(),
         Action::Version => println!("cefdetector {VERSION}"),
         Action::RunCli(options) => {
+            let _config = load_config(&load_options);
             if let Err(error) = run_cli(options) {
                 eprintln!("Error: {error}");
                 std::process::exit(1);
             }
         }
+        Action::Config(command) => handle_config_command(command, &load_options),
         #[cfg(feature = "gui")]
-        Action::LaunchGui(options) => return Some(options),
+        Action::LaunchGui(options) => {
+            let mut config = load_config(&load_options);
+            if options.system_font {
+                config.gui.fonts.mode = FontMode::System;
+            }
+            return Some(GuiOptions { config });
+        }
     }
 
     None
@@ -270,8 +448,11 @@ pub fn handle_arguments() -> Option<GuiOptions> {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "gui")]
-    use super::GuiOptions;
-    use super::{Action, CliOptions, OutputFormat, format_json, parse_arguments, push_json_string};
+    use super::GuiCliOptions;
+    use super::{
+        Action, CliOptions, ConfigCommand, OutputFormat, extract_global_options, format_json,
+        parse_arguments, push_json_string,
+    };
     use crate::models::AppInfo;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -303,7 +484,7 @@ mod tests {
     fn root_arguments_only_configure_the_gui() {
         assert_eq!(
             parse_arguments(&args(&["--system-font"])),
-            Ok(Action::LaunchGui(GuiOptions { system_font: true }))
+            Ok(Action::LaunchGui(GuiCliOptions { system_font: true }))
         );
         assert_eq!(
             parse_arguments(&args(&["cli", "--system-font"])),
@@ -316,7 +497,7 @@ mod tests {
     fn no_arguments_launches_the_gui() {
         assert_eq!(
             parse_arguments(&[]),
-            Ok(Action::LaunchGui(GuiOptions::default()))
+            Ok(Action::LaunchGui(GuiCliOptions::default()))
         );
     }
 
@@ -324,6 +505,35 @@ mod tests {
     #[test]
     fn no_arguments_prints_help_without_a_gui() {
         assert_eq!(parse_arguments(&[]), Ok(Action::RootHelp));
+    }
+
+    #[test]
+    fn global_config_options_are_removed_without_mixing_subcommand_options() {
+        let (command, options) = extract_global_options(&args(&[
+            "--no-system-config",
+            "cli",
+            "--config",
+            "extra.toml",
+            "--json",
+            "--set=search.walk_threads=2",
+        ]))
+        .unwrap();
+        assert_eq!(command, args(&["cli", "--json"]));
+        assert!(options.no_system);
+        assert_eq!(
+            options.explicit_files,
+            [std::path::PathBuf::from("extra.toml")]
+        );
+        assert_eq!(options.overrides, ["search.walk_threads=2"]);
+    }
+
+    #[test]
+    fn configuration_commands_are_separate_from_scanner_options() {
+        assert_eq!(
+            parse_arguments(&args(&["config", "paths"])),
+            Ok(Action::Config(ConfigCommand::Paths))
+        );
+        assert!(parse_arguments(&args(&["cli", "paths"])).is_err());
     }
 
     #[test]

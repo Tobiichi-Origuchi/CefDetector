@@ -1584,7 +1584,8 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
     }
 }
 
-pub fn run(use_system_fonts: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(config: crate::config::AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let use_system_fonts = matches!(config.gui.fonts.mode, crate::config::FontMode::System);
     let event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = GlowApplication::new(proxy, use_system_fonts);

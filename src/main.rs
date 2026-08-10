@@ -1,4 +1,5 @@
 mod cli;
+mod config;
 #[cfg(feature = "gui")]
 mod gui;
 
@@ -15,7 +16,7 @@ fn main() {
     };
 
     #[cfg(feature = "gui")]
-    if let Err(error) = gui::run(launch_options.system_font) {
+    if let Err(error) = gui::run(launch_options.config) {
         eprintln!("Failed to start the GUI: {error}");
         std::process::exit(1);
     }
