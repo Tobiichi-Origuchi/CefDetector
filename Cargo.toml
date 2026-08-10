@@ -39,7 +39,7 @@ ignore = "0.4.31"
 memchr = "2.8.3"
 image = { version = "0.25.10", optional = true, default-features = false, features = ["png", "ico", "webp"] }
 egui = { version = "0.35.0", optional = true, default-features = false }
-resvg = { version = "0.47.0", optional = true, default-features = false }
+resvg = { version = "0.48.1", optional = true, default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 backhand = { version = "0.25.1", optional = true, default-features = false, features = ["gzip", "lz4", "xz", "zstd"] }
