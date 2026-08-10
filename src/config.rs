@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1274,27 +1275,48 @@ fn load_file(
     required: bool,
     effective: &mut toml::Value,
 ) -> Result<bool, ConfigError> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(false);
         }
         Err(error) => {
             return Err(ConfigError::new(format!(
-                "failed to inspect {kind} config {}: {error}",
+                "failed to open {kind} config {}: {error}",
                 path.display()
             )));
         }
     };
+    let metadata = file.metadata().map_err(|error| {
+        ConfigError::new(format!(
+            "failed to inspect {kind} config {}: {error}",
+            path.display()
+        ))
+    })?;
     if metadata.len() > MAX_CONFIG_BYTES {
         return Err(ConfigError::new(format!(
             "{kind} config {} exceeds the 1 MiB safety limit",
             path.display()
         )));
     }
-    let content = std::fs::read_to_string(path).map_err(|error| {
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            ConfigError::new(format!(
+                "failed to read {kind} config {}: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(format!(
+            "{kind} config {} exceeds the 1 MiB safety limit",
+            path.display()
+        )));
+    }
+    let content = String::from_utf8(bytes).map_err(|error| {
         ConfigError::new(format!(
-            "failed to read {kind} config {}: {error}",
+            "{kind} config {} is not valid UTF-8: {error}",
             path.display()
         ))
     })?;
@@ -1310,10 +1332,12 @@ fn load_file(
 }
 
 fn structurally_validate(value: &toml::Value, source: &str) -> Result<(), ConfigError> {
-    value
+    let config = value
         .clone()
         .try_into::<AppConfig>()
-        .map(|_| ())
+        .map_err(|error| ConfigError::new(format!("invalid {source}: {error}")))?;
+    config
+        .validate()
         .map_err(|error| ConfigError::new(format!("invalid {source}: {error}")))
 }
 
@@ -1486,11 +1510,21 @@ mod tests {
             overrides: Vec::new(),
         })
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("failed to inspect explicit config")
-        );
+        assert!(error.to_string().contains("failed to open explicit config"));
+    }
+
+    #[test]
+    fn semantic_errors_name_the_responsible_file() {
+        let config = TempConfig::new("[gui.window]\nwidth = 1\n");
+        let error = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![config.0.clone()],
+            overrides: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains(&config.0.display().to_string()));
+        assert!(error.to_string().contains("gui.window.width"));
     }
 
     #[test]

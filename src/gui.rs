@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -18,11 +18,15 @@ use glutin::display::Display;
 use glutin::surface::{Surface, WindowSurface};
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
 use winit::raw_window_handle::HasWindowHandle as _;
 
+#[cfg(target_os = "linux")]
+use crate::config::LinuxDisplay;
 use crate::config::{
     AppConfig, BackgroundFit, CardField, ClickAction, FontMode, GraphicsApi, HorizontalAlign,
-    LinuxDisplay, RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
+    RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
 };
 use crate::icon_finder::{RawIcon, configured_fallback_icon, get_app_icon};
 use crate::search::core_search;
