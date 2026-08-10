@@ -87,20 +87,12 @@ Options:
 
 ### 忽略目录
 
-通过创建一个配置文件来忽略特定目录
+在 TOML 配置文件的 `[search]` 表中设置忽略规则。运行 `cefdetector config paths` 可以查看当前平台的系统级和用户级配置路径：
 
-Linux 配置文件位于 `$XDG_CONFIG_HOME/cefdetector/.ignore`，Windows 配置文件位于 `%APPDATA%\cefdetector\.ignore`：
-
-```gitignore
-# 忽略目录名称（跳过所有名为 target 和 node_modules 的目录）
-target
-node_modules
-
-# 忽略绝对路径
-/home/user/myproject/build
-
-# Windows 绝对路径
-D:\Games\build
+```toml
+[search]
+exclude_directory_names = ["target", "node_modules"]
+exclude_paths = ["/home/user/myproject/build"]
 ```
 
 ## 特性

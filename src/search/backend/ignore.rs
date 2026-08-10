@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 #[cfg(target_os = "windows")]
@@ -37,12 +36,6 @@ fn default_search_roots() -> io::Result<Vec<PathBuf>> {
     Ok(vec![PathBuf::from("/")])
 }
 
-#[cfg(target_os = "macos")]
-fn ignore_file_path() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-        .join("Library/Application Support/cefdetector/.ignore")
-}
-
 #[cfg(target_os = "windows")]
 fn default_search_roots() -> io::Result<Vec<PathBuf>> {
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
@@ -55,52 +48,15 @@ fn default_search_roots() -> io::Result<Vec<PathBuf>> {
     Ok(drive_roots_from_mask(mask))
 }
 
-#[cfg(target_os = "linux")]
-fn ignore_file_path() -> PathBuf {
-    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".config")
-        });
-    config_dir.join("cefdetector").join(".ignore")
-}
-
-#[cfg(target_os = "windows")]
-fn ignore_file_path() -> PathBuf {
-    let config_dir = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_default();
-    config_dir.join("cefdetector").join(".ignore")
-}
-
 impl CandidateFilter {
     pub(in crate::search) fn load(config: &SearchConfig) -> Self {
-        let mut filter = Self {
+        Self {
             roots: config.roots.clone(),
             dir_names: config.exclude_directory_names.iter().cloned().collect(),
             abs_paths: config.exclude_paths.iter().cloned().collect(),
             use_platform_excludes: config.use_platform_excludes,
             include_trash: config.include_trash,
-        };
-        if config.legacy_ignore_file
-            && let Ok(content) = fs::read_to_string(ignore_file_path())
-        {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if std::path::Path::new(line).is_absolute() {
-                    filter.abs_paths.insert(PathBuf::from(line));
-                } else {
-                    filter.dir_names.insert(line.to_owned());
-                }
-            }
         }
-
-        filter
     }
 
     pub(in crate::search) fn allows(&self, path: &std::path::Path) -> bool {
@@ -277,7 +233,7 @@ impl CandidateSource for IgnoreCandidateSource {
             .standard_filters(false)
             .hidden(!config.include_hidden)
             .parents(config.respect_gitignore)
-            .ignore(config.respect_gitignore)
+            .ignore(false)
             .git_global(config.respect_gitignore)
             .git_ignore(config.respect_gitignore)
             .git_exclude(config.respect_gitignore)
@@ -333,7 +289,9 @@ impl CandidateSource for IgnoreCandidateSource {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::drive_roots_from_mask;
     #[cfg(target_os = "macos")]
@@ -341,11 +299,52 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::{path_starts_with_ignore_ascii_case, windows_exclusion_roots};
 
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
     #[test]
     fn windows_drive_mask_maps_to_root_paths() {
         assert_eq!(
             drive_roots_from_mask((1 << 2) | (1 << 25)),
             [PathBuf::from("C:\\"), PathBuf::from("Z:\\")]
+        );
+    }
+
+    #[test]
+    fn dot_ignore_files_do_not_change_search_scope() {
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "cefdetector-ignore-backend-{}-{sequence}",
+            std::process::id()
+        ));
+        let ignored_directory = root.join("ignored");
+        fs::create_dir_all(&ignored_directory).unwrap();
+        fs::write(root.join(".ignore"), "ignored\n").unwrap();
+        let candidate = ignored_directory.join(if cfg!(target_os = "windows") {
+            "libcef.dll"
+        } else {
+            "libcef.so"
+        });
+        fs::write(&candidate, []).unwrap();
+
+        let config = crate::config::SearchConfig {
+            roots: Some(vec![root.clone()]),
+            use_platform_excludes: false,
+            include_trash: true,
+            respect_gitignore: true,
+            ..Default::default()
+        };
+        let filter = super::CandidateFilter::load(&config);
+        let result = crate::search::backend::CandidateSource::find_candidates(
+            &super::IgnoreCandidateSource,
+            &config,
+            &filter,
+        );
+        let _ = fs::remove_dir_all(&root);
+
+        let candidates = result.unwrap();
+        assert!(
+            candidates.iter().any(|found| found.path == candidate),
+            ".ignore unexpectedly removed {candidate:?} from {candidates:?}"
         );
     }
 
@@ -410,7 +409,6 @@ mod tests {
             exclude_paths: vec![PathBuf::from("/allowed/private")],
             exclude_directory_names: vec!["cache".to_owned()],
             use_platform_excludes: false,
-            legacy_ignore_file: false,
             ..Default::default()
         };
         let filter = super::CandidateFilter::load(&config);
