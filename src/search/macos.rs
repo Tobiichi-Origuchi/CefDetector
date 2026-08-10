@@ -16,9 +16,9 @@ use std::process::Stdio;
 
 #[cfg(feature = "index")]
 use super::backend::{ScanCandidate, classify_candidate_name};
-
 #[cfg(feature = "index")]
-const MDFIND: &str = "/usr/bin/mdfind";
+use crate::config::SpotlightConfig;
+
 #[cfg(any(test, feature = "index"))]
 const APPLICATION_QUERY: &str = r#"kMDItemContentTypeTree == "com.apple.application-bundle""#;
 #[cfg(feature = "index")]
@@ -27,8 +27,6 @@ const FILE_QUERY: &str = r#"kMDItemFSName == "Chromium Embedded Framework" || kM
 const MAX_MDFIND_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(any(test, feature = "index"))]
 const MAX_CANDIDATES: usize = 250_000;
-#[cfg(feature = "index")]
-const MDFIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BundleInfo {
@@ -139,14 +137,23 @@ fn checked_output(output: Output) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(feature = "index")]
-fn query(expression: &str) -> io::Result<Vec<PathBuf>> {
+fn query(config: &SpotlightConfig, expression: &str) -> io::Result<Vec<PathBuf>> {
     use std::io::Read as _;
 
-    let mut child = Command::new(MDFIND)
+    let mut child = Command::new(&config.command)
         .args(["-0", expression])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not start Spotlight command {:?}: {error}",
+                    config.command
+                ),
+            )
+        })?;
     let stdout = child
         .stdout
         .take()
@@ -166,10 +173,18 @@ fn query(expression: &str) -> io::Result<Vec<PathBuf>> {
         let mut bytes = Vec::new();
         stderr.take(513).read_to_end(&mut bytes).map(|_| bytes)
     });
-    let deadline = std::time::Instant::now() + MDFIND_TIMEOUT;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(config.timeout_ms);
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(error);
+            }
         }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
@@ -178,7 +193,10 @@ fn query(expression: &str) -> io::Result<Vec<PathBuf>> {
             let _ = stderr_reader.join();
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "mdfind did not finish within 30 seconds",
+                format!(
+                    "Spotlight query did not finish within {} ms",
+                    config.timeout_ms
+                ),
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
@@ -210,7 +228,7 @@ pub(super) fn is_platform_excluded(path: &Path) -> bool {
         || path.components().any(|component| {
             matches!(
                 component.as_os_str().to_str(),
-                Some(".Spotlight-V100" | ".fseventsd" | ".Trashes" | "Backups.backupdb")
+                Some(".Spotlight-V100" | ".fseventsd" | "Backups.backupdb")
             )
         })
 }
@@ -250,16 +268,19 @@ fn scan_bundle(root: &Path, candidates: &mut BTreeSet<(PathBuf, super::backend::
 }
 
 #[cfg(feature = "index")]
-pub(super) fn spotlight_candidates() -> io::Result<Vec<ScanCandidate>> {
+pub(super) fn spotlight_candidates(
+    config: &SpotlightConfig,
+    filter: &super::backend::CandidateFilter,
+) -> io::Result<Vec<ScanCandidate>> {
     let mut found = BTreeSet::new();
     let mut roots = BTreeSet::new();
     // Complete both index operations before walking application bundles. This
     // makes a disabled or unhealthy Spotlight service fail before any fallback-
     // eligible filesystem work is performed, without adding a probe query.
-    let application_paths = query(APPLICATION_QUERY)?;
-    let file_paths = query(FILE_QUERY)?;
+    let application_paths = query(config, APPLICATION_QUERY)?;
+    let file_paths = query(config, FILE_QUERY)?;
     for path in application_paths {
-        if path.is_dir() && !is_platform_excluded(&path) {
+        if path.is_dir() && filter.allows(&path) {
             roots.insert(outermost_bundle(&path).unwrap_or(path));
         }
     }
@@ -268,7 +289,7 @@ pub(super) fn spotlight_candidates() -> io::Result<Vec<ScanCandidate>> {
     }
     for path in file_paths {
         if path.is_file()
-            && !is_platform_excluded(&path)
+            && filter.allows(&path)
             && let Some(name) = path.file_name()
             && let Some(kind) = classify_candidate_name(&name.to_string_lossy())
         {

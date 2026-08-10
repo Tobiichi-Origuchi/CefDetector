@@ -19,8 +19,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, TranslateMessage, WM_APP, WM_COPYDATA, WM_TIMER, WNDCLASSEXW,
 };
 
+use crate::config::SearchConfig;
+
 use super::everything_protocol::{ITEM_FLAG_FOLDER, encode_query, parse_reply};
-use super::{CandidateSource, ScanCandidate, classify_candidate_name};
+use super::{CandidateFilter, CandidateSource, ScanCandidate, classify_candidate_name};
 
 // Everything 1.4 and 1.5 beta/release use the unnamed window class. The 1.5
 // alpha uses a named instance by default so it can run alongside 1.4.
@@ -31,8 +33,6 @@ const EVERYTHING_WINDOW_CLASSES: [&str; 2] = [
 const REPLY_WINDOW_CLASS: &str = "CEFDETECTOR_EVERYTHING_IPC";
 const EVERYTHING_COPYDATA_QUERY_W: usize = 2;
 const QUERY_REPLY_ID: usize = 0x4345_4644;
-const SEND_TIMEOUT_MS: u32 = 5_000;
-const REPLY_TIMEOUT_MS: u32 = 30_000;
 const REPLY_TIMER_ID: usize = 1;
 const REPLY_RECEIVED_MESSAGE: u32 = WM_APP + 1;
 const MAX_REPLY_BYTES: usize = 128 * 1024 * 1024;
@@ -217,7 +217,7 @@ fn create_reply_window(state: &mut QueryState) -> io::Result<Window> {
     Ok(window)
 }
 
-fn send_query(everything_window: HWND, reply_window: HWND) -> io::Result<()> {
+fn send_query(everything_window: HWND, reply_window: HWND, send_timeout_ms: u32) -> io::Result<()> {
     let reply_handle = u32::try_from(reply_window as usize)
         .map_err(|_| io::Error::other("Everything IPC reply window does not fit in 32 bits"))?;
     let search: Vec<u16> = OsStr::new(SEARCH).encode_wide().collect();
@@ -241,7 +241,7 @@ fn send_query(everything_window: HWND, reply_window: HWND) -> io::Result<()> {
             reply_window as usize,
             &mut copy_data as *mut COPYDATASTRUCT as isize,
             SMTO_ABORTIFHUNG,
-            SEND_TIMEOUT_MS,
+            send_timeout_ms,
             &mut message_result,
         )
     };
@@ -262,7 +262,7 @@ fn send_query(everything_window: HWND, reply_window: HWND) -> io::Result<()> {
     Ok(())
 }
 
-fn run_ipc_query() -> io::Result<Vec<u8>> {
+fn run_ipc_query(config: &SearchConfig) -> io::Result<Vec<u8>> {
     let Some(everything_window) = find_everything_window() else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -272,7 +272,11 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
 
     let mut state = QueryState::default();
     let reply_window = create_reply_window(&mut state)?;
-    send_query(everything_window, reply_window.0)?;
+    send_query(
+        everything_window,
+        reply_window.0,
+        config.everything.send_timeout_ms,
+    )?;
     if let Some(response) = state.response.take() {
         return response;
     }
@@ -281,7 +285,14 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
     // then exits or otherwise fails to send a reply. Keeping the timeout inside
     // this thread avoids leaking a permanently blocked detached worker.
     // SAFETY: reply_window is live and owned by the current thread.
-    let timer_id = unsafe { SetTimer(reply_window.0, REPLY_TIMER_ID, REPLY_TIMEOUT_MS, None) };
+    let timer_id = unsafe {
+        SetTimer(
+            reply_window.0,
+            REPLY_TIMER_ID,
+            config.everything.reply_timeout_ms,
+            None,
+        )
+    };
     if timer_id == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -319,7 +330,10 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
         {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "Everything did not return search results within 30 seconds",
+                format!(
+                    "Everything did not return search results within {} ms",
+                    config.everything.reply_timeout_ms
+                ),
             ));
         }
         // SAFETY: message was initialized by GetMessageW.
@@ -334,8 +348,12 @@ fn run_ipc_query() -> io::Result<Vec<u8>> {
 }
 
 impl CandidateSource for EverythingCandidateSource {
-    fn find_candidates(&self) -> io::Result<Vec<ScanCandidate>> {
-        let reply = run_ipc_query()?;
+    fn find_candidates(
+        &self,
+        config: &SearchConfig,
+        _filter: &CandidateFilter,
+    ) -> io::Result<Vec<ScanCandidate>> {
+        let reply = run_ipc_query(config)?;
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
 

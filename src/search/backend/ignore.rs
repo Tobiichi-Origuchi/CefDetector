@@ -8,15 +8,20 @@ use std::sync::{Arc, Mutex};
 
 use ::ignore::{WalkBuilder, WalkState};
 
+use crate::config::SearchConfig;
+
 use super::{CandidateSource, ScanCandidate, classify_candidate_name};
 
 #[derive(Default)]
 pub(super) struct IgnoreCandidateSource;
 
-#[derive(Default)]
-struct IgnoreConfig {
+#[derive(Clone, Default)]
+pub(in crate::search) struct CandidateFilter {
+    roots: Option<Vec<PathBuf>>,
     dir_names: HashSet<String>,
     abs_paths: HashSet<PathBuf>,
+    use_platform_excludes: bool,
+    include_trash: bool,
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -28,7 +33,7 @@ fn drive_roots_from_mask(mask: u32) -> Vec<PathBuf> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn search_roots() -> io::Result<Vec<PathBuf>> {
+fn default_search_roots() -> io::Result<Vec<PathBuf>> {
     Ok(vec![PathBuf::from("/")])
 }
 
@@ -39,7 +44,7 @@ fn ignore_file_path() -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
-fn search_roots() -> io::Result<Vec<PathBuf>> {
+fn default_search_roots() -> io::Result<Vec<PathBuf>> {
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
 
     // SAFETY: GetLogicalDrives has no parameters and returns a bitmask.
@@ -70,23 +75,60 @@ fn ignore_file_path() -> PathBuf {
     config_dir.join("cefdetector").join(".ignore")
 }
 
-fn load_ignore_config() -> IgnoreConfig {
-    let mut config = IgnoreConfig::default();
-    if let Ok(content) = fs::read_to_string(ignore_file_path()) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if std::path::Path::new(line).is_absolute() {
-                config.abs_paths.insert(PathBuf::from(line));
-            } else {
-                config.dir_names.insert(line.to_owned());
+impl CandidateFilter {
+    pub(in crate::search) fn load(config: &SearchConfig) -> Self {
+        let mut filter = Self {
+            roots: config.roots.clone(),
+            dir_names: config.exclude_directory_names.iter().cloned().collect(),
+            abs_paths: config.exclude_paths.iter().cloned().collect(),
+            use_platform_excludes: config.use_platform_excludes,
+            include_trash: config.include_trash,
+        };
+        if config.legacy_ignore_file
+            && let Ok(content) = fs::read_to_string(ignore_file_path())
+        {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if std::path::Path::new(line).is_absolute() {
+                    filter.abs_paths.insert(PathBuf::from(line));
+                } else {
+                    filter.dir_names.insert(line.to_owned());
+                }
             }
         }
+
+        filter
     }
 
-    config
+    pub(in crate::search) fn allows(&self, path: &std::path::Path) -> bool {
+        if self
+            .roots
+            .as_ref()
+            .is_some_and(|roots| !roots.iter().any(|root| path_has_prefix(path, root)))
+        {
+            return false;
+        }
+        if self
+            .abs_paths
+            .iter()
+            .any(|ignored| path_has_prefix(path, ignored))
+        {
+            return false;
+        }
+        if path
+            .components()
+            .any(|component| directory_name_is_ignored(self, component.as_os_str()))
+        {
+            return false;
+        }
+        if !self.include_trash && is_trash_path(path) {
+            return false;
+        }
+        !self.use_platform_excludes || !is_platform_excluded(path)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -119,7 +161,6 @@ fn windows_exclusion_roots(
         exclusions.push(system_drive.join("Recovery"));
     }
     for drive in drive_roots {
-        exclusions.push(drive.join("$Recycle.Bin"));
         exclusions.push(drive.join("System Volume Information"));
     }
     exclusions
@@ -160,7 +201,7 @@ fn is_platform_excluded(path: &std::path::Path) -> bool {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-        windows_exclusion_roots(windows_dir, search_roots().unwrap_or_default())
+        windows_exclusion_roots(windows_dir, default_search_roots().unwrap_or_default())
     });
 
     EXCLUSIONS
@@ -169,26 +210,22 @@ fn is_platform_excluded(path: &std::path::Path) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn path_is_ignored(config: &IgnoreConfig, path: &std::path::Path) -> bool {
-    config.abs_paths.contains(path)
+fn path_has_prefix(path: &std::path::Path, root: &std::path::Path) -> bool {
+    path.starts_with(root)
 }
 
 #[cfg(target_os = "windows")]
-fn path_is_ignored(config: &IgnoreConfig, path: &std::path::Path) -> bool {
-    let path = path.to_string_lossy();
-    config
-        .abs_paths
-        .iter()
-        .any(|ignored| path.eq_ignore_ascii_case(&ignored.to_string_lossy()))
+fn path_has_prefix(path: &std::path::Path, root: &std::path::Path) -> bool {
+    path_starts_with_ignore_ascii_case(path, root)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn directory_name_is_ignored(config: &IgnoreConfig, name: &std::ffi::OsStr) -> bool {
+fn directory_name_is_ignored(config: &CandidateFilter, name: &std::ffi::OsStr) -> bool {
     config.dir_names.contains(name.to_string_lossy().as_ref())
 }
 
 #[cfg(target_os = "windows")]
-fn directory_name_is_ignored(config: &IgnoreConfig, name: &std::ffi::OsStr) -> bool {
+fn directory_name_is_ignored(config: &CandidateFilter, name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     config
         .dir_names
@@ -196,12 +233,39 @@ fn directory_name_is_ignored(config: &IgnoreConfig, name: &std::ffi::OsStr) -> b
         .any(|ignored| name.eq_ignore_ascii_case(ignored))
 }
 
-impl CandidateSource for IgnoreCandidateSource {
-    fn find_candidates(&self) -> io::Result<Vec<ScanCandidate>> {
-        let results = Arc::new(Mutex::new(Vec::new()));
-        let ignore_config = load_ignore_config();
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn directory_name_equals(name: &std::ffi::OsStr, expected: &str) -> bool {
+    name == expected
+}
 
-        let mut roots = search_roots()?.into_iter();
+#[cfg(target_os = "windows")]
+fn directory_name_equals(name: &std::ffi::OsStr, expected: &str) -> bool {
+    name.to_string_lossy().eq_ignore_ascii_case(expected)
+}
+
+fn is_trash_path(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        [".Trash", "Trash", ".Trashes", "$Recycle.Bin"]
+            .iter()
+            .any(|name| directory_name_equals(component.as_os_str(), name))
+    })
+}
+
+impl CandidateSource for IgnoreCandidateSource {
+    fn find_candidates(
+        &self,
+        config: &SearchConfig,
+        filter: &CandidateFilter,
+    ) -> io::Result<Vec<ScanCandidate>> {
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let candidate_filter = filter.clone();
+
+        let mut roots = config
+            .roots
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(default_search_roots)?
+            .into_iter();
         let first_root = roots
             .next()
             .ok_or_else(|| io::Error::other("no filesystem roots are available to scan"))?;
@@ -211,33 +275,27 @@ impl CandidateSource for IgnoreCandidateSource {
         }
         builder
             .standard_filters(false)
-            .hidden(false)
-            .threads(
+            .hidden(!config.include_hidden)
+            .parents(config.respect_gitignore)
+            .ignore(config.respect_gitignore)
+            .git_global(config.respect_gitignore)
+            .git_ignore(config.respect_gitignore)
+            .git_exclude(config.respect_gitignore)
+            .follow_links(config.follow_symlinks)
+            .same_file_system(config.same_filesystem)
+            .threads(if config.walk_threads == 0 {
                 std::thread::available_parallelism()
                     .map(|count| count.get().min(8))
-                    .unwrap_or(4),
-            )
+                    .unwrap_or(4)
+            } else {
+                config.walk_threads
+            })
             .filter_entry(move |entry| {
                 let path = entry.path();
-                if is_platform_excluded(path) {
-                    return false;
-                }
-
-                if entry
+                !entry
                     .file_type()
                     .is_some_and(|file_type| file_type.is_dir())
-                {
-                    if path_is_ignored(&ignore_config, path) {
-                        return false;
-                    }
-                    if let Some(name) = path.file_name()
-                        && directory_name_is_ignored(&ignore_config, name)
-                    {
-                        return false;
-                    }
-                }
-
-                true
+                    || candidate_filter.allows(path)
             });
 
         builder.build_parallel().run(|| {
@@ -329,7 +387,7 @@ mod tests {
         assert!(is_excluded(std::path::Path::new(
             r"C:\Windows\WinSxS\ManifestCache"
         )));
-        assert!(is_excluded(std::path::Path::new(
+        assert!(!is_excluded(std::path::Path::new(
             r"D:\$Recycle.Bin\deleted-app"
         )));
         assert!(is_excluded(std::path::Path::new(
@@ -342,5 +400,31 @@ mod tests {
             r"C:\Program Files\WindowsApps"
         )));
         assert!(!is_excluded(std::path::Path::new(r"D:\Windows\WinSxS")));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn configured_scope_applies_to_all_candidate_backends() {
+        let mut config = crate::config::SearchConfig {
+            roots: Some(vec![PathBuf::from("/allowed")]),
+            exclude_paths: vec![PathBuf::from("/allowed/private")],
+            exclude_directory_names: vec!["cache".to_owned()],
+            use_platform_excludes: false,
+            legacy_ignore_file: false,
+            ..Default::default()
+        };
+        let filter = super::CandidateFilter::load(&config);
+
+        assert!(filter.allows(std::path::Path::new("/allowed/app/libcef.so")));
+        assert!(!filter.allows(std::path::Path::new("/other/app/libcef.so")));
+        assert!(!filter.allows(std::path::Path::new("/allowed/private/app/libcef.so")));
+        assert!(!filter.allows(std::path::Path::new("/allowed/cache/app/libcef.so")));
+        assert!(!filter.allows(std::path::Path::new("/allowed/.Trash/app/libcef.so")));
+
+        config.include_trash = true;
+        assert!(
+            super::CandidateFilter::load(&config)
+                .allows(std::path::Path::new("/allowed/.Trash/app/libcef.so"))
+        );
     }
 }

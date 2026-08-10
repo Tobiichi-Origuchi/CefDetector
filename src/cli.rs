@@ -322,9 +322,10 @@ fn format_results(results: &[AppInfo], format: OutputFormat) -> String {
     }
 }
 
-fn run_cli(options: CliOptions) -> Result<(), String> {
+fn run_cli(config: &AppConfig, options: CliOptions) -> Result<(), String> {
     let mut results = Vec::new();
-    core_search(|info| results.push(info)).map_err(|error| format!("search failed: {error}"))?;
+    core_search(config, |info| results.push(info))
+        .map_err(|error| format!("search failed: {error}"))?;
 
     let output = format_results(&results, options.output_format);
     if let Some(path) = options.output_path {
@@ -425,8 +426,8 @@ pub fn handle_arguments() -> Option<GuiOptions> {
         Action::CliHelp => print_cli_help(),
         Action::Version => println!("cefdetector {VERSION}"),
         Action::RunCli(options) => {
-            let _config = load_config(&load_options);
-            if let Err(error) = run_cli(options) {
+            let config = load_config(&load_options);
+            if let Err(error) = run_cli(&config, options) {
                 eprintln!("Error: {error}");
                 std::process::exit(1);
             }

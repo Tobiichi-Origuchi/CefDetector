@@ -153,7 +153,8 @@ struct Frontend {
 }
 
 impl Frontend {
-    fn new(ctx: &egui::Context, use_system_fonts: bool) -> Result<Self, GuiError> {
+    fn new(ctx: &egui::Context, config: Arc<crate::config::AppConfig>) -> Result<Self, GuiError> {
+        let use_system_fonts = matches!(config.gui.fonts.mode, crate::config::FontMode::System);
         let text_renderer = configure_text_renderer(ctx, use_system_fonts)?;
 
         let background = load_texture(
@@ -170,7 +171,7 @@ impl Frontend {
         );
 
         let (sender, receiver) = mpsc::channel();
-        spawn_search(ctx.clone(), sender);
+        spawn_search(ctx.clone(), sender, config);
 
         Ok(Self {
             receiver,
@@ -657,14 +658,18 @@ fn paint_prepared_text(
     }
 }
 
-fn spawn_search(ctx: egui::Context, sender: mpsc::Sender<SearchMessage>) {
+fn spawn_search(
+    ctx: egui::Context,
+    sender: mpsc::Sender<SearchMessage>,
+    config: Arc<crate::config::AppConfig>,
+) {
     std::thread::spawn(move || {
         let mut count = 0;
         let mut total_size = 0;
         let mut batch = Vec::new();
         let mut last_flush = Instant::now();
 
-        let search_result = core_search(|info| {
+        let search_result = core_search(&config, |info| {
             count += 1;
             total_size += info.size;
 
@@ -1407,11 +1412,14 @@ struct GlowApplication {
     frontend: Option<Frontend>,
     error: Option<GuiError>,
     exit_after_first_frame: bool,
-    use_system_fonts: bool,
+    config: Arc<crate::config::AppConfig>,
 }
 
 impl GlowApplication {
-    fn new(proxy: winit::event_loop::EventLoopProxy<UserEvent>, use_system_fonts: bool) -> Self {
+    fn new(
+        proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+        config: crate::config::AppConfig,
+    ) -> Self {
         Self {
             proxy,
             gl_window: None,
@@ -1420,7 +1428,7 @@ impl GlowApplication {
             frontend: None,
             error: None,
             exit_after_first_frame: std::env::var_os("CEFDETECTOR_GUI_SMOKE_TEST").is_some(),
-            use_system_fonts,
+            config: Arc::new(config),
         }
     }
 
@@ -1445,7 +1453,7 @@ impl GlowApplication {
         egui.egui_ctx.set_request_repaint_callback(move |request| {
             let _ = proxy.send_event(UserEvent::Repaint(request.delay));
         });
-        let frontend = match Frontend::new(&egui.egui_ctx, self.use_system_fonts) {
+        let frontend = match Frontend::new(&egui.egui_ctx, Arc::clone(&self.config)) {
             Ok(frontend) => frontend,
             Err(error) => {
                 egui.destroy();
@@ -1585,10 +1593,9 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
 }
 
 pub fn run(config: crate::config::AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let use_system_fonts = matches!(config.gui.fonts.mode, crate::config::FontMode::System);
     let event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
-    let mut app = GlowApplication::new(proxy, use_system_fonts);
+    let mut app = GlowApplication::new(proxy, config);
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.error {
         return Err(Box::new(error));

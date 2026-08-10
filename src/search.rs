@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+use crate::config::AppConfig;
 use crate::models::AppInfo;
 
 mod backend;
@@ -198,15 +199,19 @@ fn dir_size(dir: &Path) -> u64 {
     total
 }
 
-fn calculate_dir_sizes(apps: &[DetectedApp]) -> Vec<u64> {
+fn calculate_dir_sizes(apps: &[DetectedApp], configured_threads: usize) -> Vec<u64> {
     if apps.len() <= 1 {
         return apps.iter().map(|app| dir_size(&app.root)).collect();
     }
 
-    let worker_count = std::thread::available_parallelism()
-        .map_or(2, |count| count.get())
-        .min(4)
-        .min(apps.len());
+    let worker_count = if configured_threads == 0 {
+        std::thread::available_parallelism()
+            .map_or(2, |count| count.get())
+            .min(4)
+    } else {
+        configured_threads
+    }
+    .min(apps.len());
     let next_index = AtomicUsize::new(0);
     let sizes = Mutex::new(vec![0_u64; apps.len()]);
 
@@ -733,28 +738,18 @@ fn resolve_macos_bundle(root: &Path, candidates: &[backend::ScanCandidate]) -> D
     }
 }
 
-fn is_ignored_candidate(path: &Path) -> bool {
-    path.components().any(|component| {
-        let component = component.as_os_str();
-        component == ".Trash" || component == "Trash"
-    })
-}
-
-pub fn core_search<F>(mut on_found: F) -> io::Result<()>
+pub fn core_search<F>(config: &AppConfig, mut on_found: F) -> io::Result<()>
 where
     F: FnMut(AppInfo),
 {
     let running_processes = get_running_processes();
-    let candidates = backend::find_candidates()?;
+    let candidates = backend::find_candidates(&config.search, config.diagnostics.report_backend)?;
     let mut standard_dirs: BTreeMap<PathBuf, CandidateFlags> = BTreeMap::new();
     let mut node_dirs = HashSet::new();
     #[cfg(target_os = "macos")]
     let mut bundle_candidates: BTreeMap<PathBuf, Vec<backend::ScanCandidate>> = BTreeMap::new();
 
     for candidate in candidates {
-        if is_ignored_candidate(&candidate.path) {
-            continue;
-        }
         #[cfg(target_os = "macos")]
         if let Some(root) = candidate
             .application_root_hint
@@ -824,7 +819,7 @@ where
     });
 
     let detected: Vec<_> = detected_by_root.into_values().collect();
-    let sizes = calculate_dir_sizes(&detected);
+    let sizes = calculate_dir_sizes(&detected, config.search.size_threads);
     for (app, size) in detected.into_iter().zip(sizes) {
         let is_running = app
             .executable_path

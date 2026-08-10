@@ -1,6 +1,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::config::{SearchBackend, SearchConfig};
+
 #[cfg(all(feature = "index", target_os = "windows"))]
 mod everything;
 #[cfg(any(test, all(feature = "index", target_os = "windows")))]
@@ -10,6 +12,8 @@ mod ignore;
 mod plocate;
 #[cfg(all(feature = "index", target_os = "macos"))]
 mod spotlight;
+
+pub(super) use ignore::CandidateFilter;
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 compile_error!("cefdetector supports Linux, Windows, and macOS");
@@ -34,7 +38,11 @@ pub(super) struct ScanCandidate {
 /// Implementations should only discover candidates. Binary inspection, application
 /// grouping, size calculation, and process matching remain backend-independent.
 pub(super) trait CandidateSource {
-    fn find_candidates(&self) -> io::Result<Vec<ScanCandidate>>;
+    fn find_candidates(
+        &self,
+        config: &SearchConfig,
+        filter: &CandidateFilter,
+    ) -> io::Result<Vec<ScanCandidate>>;
 }
 
 #[cfg(any(test, feature = "index"))]
@@ -45,17 +53,24 @@ pub(super) trait CandidateSource {
 /// the real operation's error is both stronger and has no probe overhead.
 fn indexed_or_fallback<T>(
     indexed_backend: &str,
+    fallback_enabled: bool,
+    report_backend: bool,
     indexed: impl FnOnce() -> io::Result<T>,
     fallback: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
     match indexed() {
         Ok(result) => {
-            eprintln!("cefdetector-search-backend={indexed_backend}");
+            if report_backend {
+                eprintln!("cefdetector-search-backend={indexed_backend}");
+            }
             Ok(result)
         }
+        Err(indexed_error) if !fallback_enabled => Err(indexed_error),
         Err(indexed_error) => match fallback() {
             Ok(result) => {
-                eprintln!("cefdetector-search-backend=ignore");
+                if report_backend {
+                    eprintln!("cefdetector-search-backend=ignore");
+                }
                 Ok(result)
             }
             Err(fallback_error) => Err(io::Error::new(
@@ -69,35 +84,88 @@ fn indexed_or_fallback<T>(
 }
 
 #[cfg(all(feature = "index", target_os = "linux"))]
-pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
+fn find_indexed_candidates(
+    config: &SearchConfig,
+    filter: &CandidateFilter,
+    report_backend: bool,
+) -> io::Result<Vec<ScanCandidate>> {
     indexed_or_fallback(
         "plocate",
-        || plocate::PlocateCandidateSource.find_candidates(),
-        || ignore::IgnoreCandidateSource.find_candidates(),
+        config.index_fallback,
+        report_backend,
+        || plocate::PlocateCandidateSource.find_candidates(config, filter),
+        || ignore::IgnoreCandidateSource.find_candidates(config, filter),
     )
 }
 
 #[cfg(all(feature = "index", target_os = "windows"))]
-pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
+fn find_indexed_candidates(
+    config: &SearchConfig,
+    filter: &CandidateFilter,
+    report_backend: bool,
+) -> io::Result<Vec<ScanCandidate>> {
     indexed_or_fallback(
         "everything",
-        || everything::EverythingCandidateSource.find_candidates(),
-        || ignore::IgnoreCandidateSource.find_candidates(),
+        config.index_fallback,
+        report_backend,
+        || everything::EverythingCandidateSource.find_candidates(config, filter),
+        || ignore::IgnoreCandidateSource.find_candidates(config, filter),
     )
 }
 
 #[cfg(all(feature = "index", target_os = "macos"))]
-pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
+fn find_indexed_candidates(
+    config: &SearchConfig,
+    filter: &CandidateFilter,
+    report_backend: bool,
+) -> io::Result<Vec<ScanCandidate>> {
     indexed_or_fallback(
         "spotlight",
-        || spotlight::SpotlightCandidateSource.find_candidates(),
-        || ignore::IgnoreCandidateSource.find_candidates(),
+        config.index_fallback,
+        report_backend,
+        || spotlight::SpotlightCandidateSource.find_candidates(config, filter),
+        || ignore::IgnoreCandidateSource.find_candidates(config, filter),
     )
 }
 
-#[cfg(not(feature = "index"))]
-pub(super) fn find_candidates() -> io::Result<Vec<ScanCandidate>> {
-    ignore::IgnoreCandidateSource.find_candidates()
+pub(super) fn find_candidates(
+    config: &SearchConfig,
+    report_backend: bool,
+) -> io::Result<Vec<ScanCandidate>> {
+    let filter = CandidateFilter::load(config);
+    let candidates = match config.backend {
+        SearchBackend::Filesystem => {
+            let candidates = ignore::IgnoreCandidateSource.find_candidates(config, &filter)?;
+            if report_backend {
+                eprintln!("cefdetector-search-backend=ignore");
+            }
+            candidates
+        }
+        #[cfg(feature = "index")]
+        SearchBackend::Auto | SearchBackend::Index => {
+            find_indexed_candidates(config, &filter, report_backend)?
+        }
+        #[cfg(not(feature = "index"))]
+        SearchBackend::Auto => {
+            let candidates = ignore::IgnoreCandidateSource.find_candidates(config, &filter)?;
+            if report_backend {
+                eprintln!("cefdetector-search-backend=ignore");
+            }
+            candidates
+        }
+        #[cfg(not(feature = "index"))]
+        SearchBackend::Index => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the index backend requires compiling cefdetector with the index feature",
+            ));
+        }
+    };
+
+    Ok(candidates
+        .into_iter()
+        .filter(|candidate| filter.allows(&candidate.path))
+        .collect())
 }
 
 pub(super) fn classify_candidate_name(name: &str) -> Option<CandidateKind> {
@@ -141,6 +209,8 @@ mod tests {
         let fallback_called = Cell::new(false);
         let result = indexed_or_fallback(
             "test-index",
+            true,
+            false,
             || Ok(7),
             || {
                 fallback_called.set(true);
@@ -156,6 +226,8 @@ mod tests {
     fn failed_index_search_uses_filesystem_fallback() {
         let result = indexed_or_fallback(
             "test-index",
+            true,
+            false,
             || Err(io::Error::other("index unavailable")),
             || Ok::<_, io::Error>(9),
         );
@@ -167,6 +239,8 @@ mod tests {
     fn failure_reports_both_backend_errors() {
         let error = indexed_or_fallback::<()>(
             "test-index",
+            true,
+            false,
             || Err(io::Error::other("index unavailable")),
             || {
                 Err(io::Error::new(
@@ -180,5 +254,24 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("index unavailable"));
         assert!(error.to_string().contains("scan denied"));
+    }
+
+    #[test]
+    fn disabled_fallback_preserves_index_error() {
+        let fallback_called = Cell::new(false);
+        let error = indexed_or_fallback::<()>(
+            "test-index",
+            false,
+            false,
+            || Err(io::Error::other("index unavailable")),
+            || {
+                fallback_called.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "index unavailable");
+        assert!(!fallback_called.get());
     }
 }
