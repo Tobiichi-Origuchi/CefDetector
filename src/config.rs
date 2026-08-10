@@ -36,6 +36,10 @@ impl RgbaColor {
         Self([red, green, blue, alpha])
     }
 
+    pub fn channels(self) -> [u8; 4] {
+        self.0
+    }
+
     fn parse(value: &str) -> Result<Self, ConfigError> {
         let digits = value
             .strip_prefix('#')

@@ -96,8 +96,8 @@ struct FileIdentity {
 }
 
 #[cfg(all(feature = "gui", target_os = "linux"))]
-pub fn open_path(path: String, is_dir: bool) {
-    if path.contains("://") || is_dir {
+pub fn open_path(path: String, is_dir: bool, reveal: bool) {
+    if path.contains("://") || is_dir || !reveal {
         let _ = Command::new("xdg-open").arg(path).spawn();
     } else if let Some(parent) = Path::new(&path).parent() {
         let _ = Command::new("xdg-open").arg(parent).spawn();
@@ -105,9 +105,9 @@ pub fn open_path(path: String, is_dir: bool) {
 }
 
 #[cfg(all(feature = "gui", target_os = "macos"))]
-pub fn open_path(path: String, _is_dir: bool) {
+pub fn open_path(path: String, _is_dir: bool, reveal: bool) {
     let mut command = Command::new("/usr/bin/open");
-    if !path.contains("://") {
+    if reveal && !path.contains("://") {
         command.arg("-R");
     }
     let _ = command.arg(path).spawn();
@@ -124,14 +124,14 @@ fn explorer_select_argument(path: &std::ffi::OsStr) -> std::ffi::OsString {
 }
 
 #[cfg(all(feature = "gui", target_os = "windows"))]
-pub fn open_path(path: String, is_dir: bool) {
+pub fn open_path(path: String, is_dir: bool, reveal: bool) {
     use std::os::windows::ffi::OsStrExt as _;
 
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let operation = ['o', 'p', 'e', 'n', '\0'].map(|character| character as u16);
-    let (target, parameters) = if path.contains("://") || is_dir {
+    let (target, parameters) = if path.contains("://") || is_dir || !reveal {
         let target: Vec<u16> = std::ffi::OsStr::new(&path)
             .encode_wide()
             .chain(std::iter::once(0))

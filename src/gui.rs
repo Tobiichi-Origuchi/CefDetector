@@ -1,15 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-
-#[cfg(target_os = "macos")]
-use std::cell::RefCell;
-#[cfg(not(target_os = "macos"))]
-use std::path::PathBuf;
 
 use egui::text::TextWrapping;
 use egui::{
@@ -21,30 +16,26 @@ use egui_glow::egui_winit::winit;
 use glutin::context::PossiblyCurrentContext;
 use glutin::display::Display;
 use glutin::surface::{Surface, WindowSurface};
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
 use winit::raw_window_handle::HasWindowHandle as _;
 
+use crate::config::{
+    AppConfig, BackgroundFit, CardField, ClickAction, FontMode, GraphicsApi, HorizontalAlign,
+    LinuxDisplay, RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
+};
 use crate::icon_finder::{RawIcon, get_app_icon};
 use crate::search::core_search;
 
 #[cfg(target_os = "macos")]
 mod macos_text;
 
-const WINDOW_TITLE: &str = "CEF Detector";
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "cefdetector";
-const REPOSITORY_URL: &str = "https://github.com/Tobiichi-Origuchi/CefDetector";
 
-const WINDOW_WIDTH: f32 = 800.0;
-const WINDOW_HEIGHT: f32 = 600.0;
-const TITLE_FONT_SIZE: f32 = 18.0;
-const MIN_TITLE_FONT_SIZE: f32 = 12.0;
-const MAX_TITLE_FONT_SIZE: f32 = 64.0;
-const CARD_WIDTH: f32 = 94.0;
-const CARD_HEIGHT: f32 = 116.0;
-const CELL_WIDTH: f32 = 106.0;
-const CELL_HEIGHT: f32 = 128.0;
-
+#[cfg(test)]
 const SEARCHING_TEXT: &str = "正在全盘搜索 CEF 应用，请耐心等待...";
+#[cfg(test)]
 const REPOSITORY_TEXT: &str = "Repo: github.com/Tobiichi-Origuchi/CefDetector (求个STAR!)";
 
 #[derive(Debug)]
@@ -66,7 +57,6 @@ struct PendingItem {
     is_dir: bool,
     icon_raw: RawIcon,
     filename: String,
-    raw_size: i32,
 }
 
 struct AppItem {
@@ -77,7 +67,7 @@ struct AppItem {
     is_dir: bool,
     icon: TextureHandle,
     filename: String,
-    raw_size: i32,
+    size: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -139,10 +129,12 @@ enum SearchMessage {
 }
 
 struct Frontend {
+    config: Arc<AppConfig>,
     receiver: mpsc::Receiver<SearchMessage>,
     apps: Vec<AppItem>,
     search_status: String,
     search_done: bool,
+    search_failed: bool,
     scroll_offset: f32,
     scroll_drag_origin: Option<f32>,
     content_drag_origin: Option<(f32, f32)>,
@@ -153,31 +145,44 @@ struct Frontend {
 }
 
 impl Frontend {
-    fn new(ctx: &egui::Context, config: Arc<crate::config::AppConfig>) -> Result<Self, GuiError> {
-        let use_system_fonts = matches!(config.gui.fonts.mode, crate::config::FontMode::System);
-        let text_renderer = configure_text_renderer(ctx, use_system_fonts)?;
+    fn new(ctx: &egui::Context, config: Arc<AppConfig>) -> Result<Self, GuiError> {
+        let text_renderer = configure_text_renderer(ctx, &config.gui.fonts)?;
 
+        let background_bytes = if let Some(path) = &config.gui.background.path {
+            std::fs::read(path).map_err(|error| {
+                GuiError(format!(
+                    "failed to read configured background {}: {error}",
+                    path.display()
+                ))
+            })?
+        } else {
+            include_bytes!("../ui/background.webp").to_vec()
+        };
         let background = load_texture(
             ctx,
             "background",
-            decode_raster(include_bytes!("../ui/background.webp"), false)
-                .ok_or_else(|| GuiError("embedded background.webp is invalid".into()))?,
+            decode_raster(&background_bytes, false, u32::MAX)
+                .ok_or_else(|| GuiError("configured background image is invalid".into()))?,
+            texture_options(config.gui.background.filter),
         );
         let default_icon = load_texture(
             ctx,
             "default-cef-icon",
-            decode_raster(include_bytes!("../icons/default_cef_icon.ico"), true)
+            decode_raster(include_bytes!("../icons/default_cef_icon.ico"), true, 64)
                 .ok_or_else(|| GuiError("embedded default_cef_icon.ico is invalid".into()))?,
+            TextureOptions::LINEAR,
         );
 
         let (sender, receiver) = mpsc::channel();
-        spawn_search(ctx.clone(), sender, config);
+        spawn_search(ctx.clone(), sender, Arc::clone(&config));
 
         Ok(Self {
+            search_status: config.gui.status.searching_text.clone(),
+            config,
             receiver,
             apps: Vec::new(),
-            search_status: SEARCHING_TEXT.into(),
             search_done: false,
+            search_failed: false,
             scroll_offset: 0.0,
             scroll_drag_origin: None,
             content_drag_origin: None,
@@ -202,31 +207,36 @@ impl Frontend {
                         self.apps.push(AppItem {
                             file: pending.file,
                             app_type: pending.app_type,
-                            size_str: format_size(pending.size),
+                            size_str: format_size(pending.size, &self.config.gui.size_format),
                             is_running: pending.is_running,
                             is_dir: pending.is_dir,
                             icon,
                             filename: pending.filename,
-                            raw_size: pending.raw_size,
+                            size: pending.size,
                         });
                     }
-                    self.search_status = format!(
-                        "这台电脑上已找到 {} 个 Chromium 内核的应用 ({}) - 搜索中...",
+                    self.search_status = format_status_template(
+                        &self.config.gui.status.progress_text,
                         count,
-                        format_size(total_size)
+                        total_size,
+                        &self.config.gui.size_format,
                     );
                 }
                 SearchMessage::Done { count, total_size } => {
-                    self.apps
-                        .sort_by_key(|item| std::cmp::Reverse(item.raw_size));
+                    sort_apps(
+                        &mut self.apps,
+                        self.config.gui.grid.sort_by,
+                        self.config.gui.grid.sort_order,
+                    );
                     self.search_status = if count > 0 {
-                        format!(
-                            "搜索完成！这台电脑上总共有 {} 个 Chromium 内核的应用 ({})",
+                        format_status_template(
+                            &self.config.gui.status.success_text,
                             count,
-                            format_size(total_size)
+                            total_size,
+                            &self.config.gui.size_format,
                         )
                     } else {
-                        "搜索完成！这台电脑上没有 Chromium 内核的应用".into()
+                        self.config.gui.status.empty_text.clone()
                     };
                     self.search_done = true;
 
@@ -235,8 +245,10 @@ impl Frontend {
                     self.decoded_icons.clear();
                 }
                 SearchMessage::Failed(error) => {
-                    self.search_status = format!("搜索失败：{error}");
+                    self.search_status =
+                        self.config.gui.status.error_text.replace("{error}", &error);
                     self.search_done = true;
+                    self.search_failed = true;
                     self.decoded_icons.clear();
                 }
             }
@@ -249,8 +261,15 @@ impl Frontend {
             return texture.clone();
         }
 
-        let texture = decode_icon(raw)
-            .map(|image| load_texture(ctx, &format!("app-icon-{hash:016x}"), image))
+        let texture = decode_icon(raw, self.config.icons.decode_max_size)
+            .map(|image| {
+                load_texture(
+                    ctx,
+                    &format!("app-icon-{hash:016x}"),
+                    image,
+                    TextureOptions::LINEAR,
+                )
+            })
             .unwrap_or_else(|| self.default_icon.clone());
         self.decoded_icons.insert(hash, texture.clone());
         texture
@@ -259,57 +278,79 @@ impl Frontend {
     fn ui(&mut self, ui: &mut egui::Ui) {
         self.receive_search_results(ui.ctx());
 
+        let config = Arc::clone(&self.config);
         let root = ui.max_rect();
         let width = root.width();
         let height = root.height();
         let painter = ui.painter_at(root);
 
-        paint_cover_image(&painter, root, &self.background);
+        paint_background(
+            &painter,
+            root,
+            &self.background,
+            config.gui.background.fit,
+            color32(config.gui.background.fallback_color),
+        );
 
-        let status_color = if self.search_done {
-            Color32::from_rgb(33, 150, 243)
+        let status_color = if self.search_failed {
+            color32(config.gui.status.error_color)
+        } else if self.search_done {
+            color32(config.gui.status.success_color)
         } else {
-            Color32::WHITE
+            color32(config.gui.status.searching_color)
         };
-        let status = self.layout_text(
-            &painter,
-            &self.search_status,
-            title_font_size(root.size()),
-            TextRole::Title,
-            status_color,
-            None,
-        );
-        let status_size = prepared_text_size(&status);
-        paint_prepared_text(
-            &painter,
-            pos2(
-                root.left() + width * 0.5 - status_size.x * 0.5,
-                root.top() + height * 0.21,
-            ),
-            &status,
-            status_color,
-        );
+        if config.gui.status.visible {
+            let status = self.layout_text(
+                &painter,
+                &self.search_status,
+                title_font_size(root.size(), &config.gui.status, &config.gui.window),
+                TextRole::Title,
+                status_color,
+                None,
+            );
+            let status_size = prepared_text_size(&status);
+            let anchor_x = root.left() + width * config.gui.status.x;
+            let status_x = match config.gui.status.horizontal_align {
+                HorizontalAlign::Left => anchor_x,
+                HorizontalAlign::Center => anchor_x - status_size.x * 0.5,
+                HorizontalAlign::Right => anchor_x - status_size.x,
+            };
+            paint_prepared_text(
+                &painter,
+                pos2(status_x, root.top() + height * config.gui.status.y),
+                &status,
+                status_color,
+            );
+        }
 
         self.paint_grid(ui, root);
-        self.paint_repository_link(ui, root);
+        if config.gui.footer.visible {
+            self.paint_repository_link(ui, root);
+        }
     }
 
     fn paint_grid(&mut self, ui: &mut egui::Ui, root: Rect) {
-        let scroll_width = root.width() * 0.80;
-        let columns = ((scroll_width / CELL_WIDTH).floor() as usize).max(1);
+        let config = Arc::clone(&self.config);
+        let grid = &config.gui.grid;
+        let card_config = &config.gui.card;
+        let scroll_width = root.width() * grid.width;
+        let scrollbar_reserve = if config.gui.scrolling.scrollbar == ScrollbarMode::Hidden {
+            0.0
+        } else {
+            config.gui.scrollbar.gap + config.gui.scrollbar.width
+        };
+        let viewport_width = (scroll_width - scrollbar_reserve).max(0.0);
+        let columns = ((scroll_width / grid.cell_width).floor() as usize).max(grid.min_columns);
         let rows = self.apps.len().div_ceil(columns);
 
         let viewport = Rect::from_min_size(
             pos2(
-                root.left() + root.width() * 0.10,
-                root.top() + root.height() * 0.30,
+                root.left() + root.width() * grid.x,
+                root.top() + root.height() * grid.y,
             ),
-            vec2(
-                (scroll_width - 16.0).max(0.0),
-                (root.height() * 0.60).max(0.0),
-            ),
+            vec2(viewport_width, (root.height() * grid.height).max(0.0)),
         );
-        let content_height = rows as f32 * CELL_HEIGHT;
+        let content_height = rows as f32 * grid.cell_height;
         let max_scroll = (content_height - viewport.height()).max(0.0);
         self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
 
@@ -322,7 +363,9 @@ impl Frontend {
         if pointer_over_viewport {
             let wheel = ui.input(|input| input.smooth_scroll_delta.y);
             if wheel != 0.0 {
-                self.scroll_offset = (self.scroll_offset - wheel).clamp(0.0, max_scroll);
+                self.scroll_offset = (self.scroll_offset
+                    - wheel * config.gui.scrolling.wheel_speed)
+                    .clamp(0.0, max_scroll);
             }
         }
         let pointer = ui.input(|input| {
@@ -332,7 +375,8 @@ impl Frontend {
                 input.pointer.primary_down(),
             )
         });
-        if pointer.1
+        if config.gui.scrolling.drag_content
+            && pointer.1
             && pointer
                 .0
                 .is_some_and(|position| viewport.contains(position))
@@ -340,7 +384,7 @@ impl Frontend {
         {
             self.content_drag_origin = pointer.0.map(|position| (position.y, self.scroll_offset));
         }
-        if pointer.2 {
+        if config.gui.scrolling.drag_content && pointer.2 {
             if let (Some(position), Some((start_y, start_scroll))) =
                 (pointer.0, self.content_drag_origin)
             {
@@ -351,8 +395,9 @@ impl Frontend {
         }
 
         let clipped_painter = ui.painter().with_clip_rect(viewport);
-        let first_row = (self.scroll_offset / CELL_HEIGHT).floor() as usize;
-        let last_row = ((self.scroll_offset + viewport.height()) / CELL_HEIGHT).ceil() as usize + 1;
+        let first_row = (self.scroll_offset / grid.cell_height).floor() as usize;
+        let last_row =
+            ((self.scroll_offset + viewport.height()) / grid.cell_height).ceil() as usize + 1;
         let start_index = first_row.saturating_mul(columns);
         let end_index = last_row.saturating_mul(columns).min(self.apps.len());
 
@@ -361,45 +406,69 @@ impl Frontend {
             let column = index % columns;
             let card = Rect::from_min_size(
                 pos2(
-                    viewport.left() + column as f32 * CELL_WIDTH + 6.0,
-                    viewport.top() + row as f32 * CELL_HEIGHT + 6.0 - self.scroll_offset,
+                    viewport.left() + column as f32 * grid.cell_width + card_config.offset_x,
+                    viewport.top() + row as f32 * grid.cell_height + card_config.offset_y
+                        - self.scroll_offset,
                 ),
-                vec2(CARD_WIDTH, CARD_HEIGHT),
+                vec2(card_config.width, card_config.height),
             );
             if !card.intersects(viewport) {
                 continue;
             }
 
+            let sense = if card_config.click_action == ClickAction::None {
+                Sense::hover()
+            } else {
+                Sense::click()
+            };
             let response = ui.interact(
                 card.intersect(viewport),
                 Id::new(("app-card", index)),
-                Sense::click(),
+                sense,
             );
-            if response.hovered() {
+            if response.hovered() && card_config.click_action != ClickAction::None {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             }
             if response.clicked() {
                 let item = &self.apps[index];
-                crate::search::open_path(item.file.clone(), item.is_dir);
+                match card_config.click_action {
+                    ClickAction::Reveal => {
+                        crate::search::open_path(item.file.clone(), item.is_dir, true);
+                    }
+                    ClickAction::Open => {
+                        crate::search::open_path(item.file.clone(), item.is_dir, false);
+                    }
+                    ClickAction::None => {}
+                }
             }
 
             let card_background = if response.hovered() {
-                Color32::from_white_alpha(140)
+                color32(card_config.background_hover)
             } else {
-                Color32::from_white_alpha(77)
+                color32(card_config.background)
+            };
+            let border_color = if response.hovered() {
+                color32(card_config.border_color_hover)
+            } else {
+                color32(card_config.border_color)
             };
             clipped_painter.rect(
                 card,
-                4.0,
+                card_config.corner_radius,
                 card_background,
-                Stroke::new(1.0, card_background),
+                Stroke::new(card_config.border_width, border_color),
                 StrokeKind::Inside,
             );
 
             self.paint_card(&clipped_painter, card, &self.apps[index]);
         }
 
-        if content_height > viewport.height() {
+        let show_scrollbar = match config.gui.scrolling.scrollbar {
+            ScrollbarMode::Auto => content_height > viewport.height(),
+            ScrollbarMode::Always => true,
+            ScrollbarMode::Hidden => false,
+        };
+        if show_scrollbar {
             self.paint_scrollbar(ui, viewport, content_height, max_scroll);
         } else {
             self.scroll_drag_origin = None;
@@ -407,80 +476,121 @@ impl Frontend {
     }
 
     fn paint_card(&self, painter: &egui::Painter, card: Rect, item: &AppItem) {
+        let card_config = &self.config.gui.card;
         let running_color = if item.is_running {
-            Color32::from_rgb(76, 175, 80)
+            color32(card_config.running_text_color)
         } else {
-            Color32::BLACK
+            color32(card_config.normal_text_color)
         };
-        let filename = self.layout_text(
-            painter,
-            &item.filename,
-            11.0,
-            TextRole::CardBold,
-            running_color,
-            Some(76.0),
-        );
-        let app_type = self.layout_text(
-            painter,
-            &item.app_type,
-            10.0,
-            TextRole::CardRegular,
-            running_color,
-            None,
-        );
-        let size_color = Color32::from_black_alpha(214);
-        let size = self.layout_text(
-            painter,
-            &item.size_str,
-            9.0,
-            TextRole::CardRegular,
-            size_color,
-            None,
-        );
-        let filename_size = prepared_text_size(&filename);
-        let app_type_size = prepared_text_size(&app_type);
-        let size_size = prepared_text_size(&size);
+        let size_color = color32(card_config.size_color);
+        let mut text = Vec::new();
+        for field in &card_config.fields {
+            let prepared = match field {
+                CardField::Filename if card_config.filename_visible => Some((
+                    self.layout_text(
+                        painter,
+                        &item.filename,
+                        card_config.filename_font_size,
+                        if card_config.filename_bold {
+                            TextRole::CardBold
+                        } else {
+                            TextRole::CardRegular
+                        },
+                        running_color,
+                        Some(card_config.filename_max_width),
+                    ),
+                    running_color,
+                )),
+                CardField::Type if card_config.type_visible => Some((
+                    self.layout_text(
+                        painter,
+                        &item.app_type,
+                        card_config.type_font_size,
+                        TextRole::CardRegular,
+                        running_color,
+                        None,
+                    ),
+                    running_color,
+                )),
+                CardField::Size if card_config.size_visible => Some((
+                    self.layout_text(
+                        painter,
+                        &item.size_str,
+                        card_config.size_font_size,
+                        TextRole::CardRegular,
+                        size_color,
+                        None,
+                    ),
+                    size_color,
+                )),
+                _ => None,
+            };
+            if let Some(prepared) = prepared {
+                text.push(prepared);
+            }
+        }
 
-        let content_height = 36.0 + filename_size.y + app_type_size.y + size_size.y + 3.0 * 2.0;
-        let mut y = card.top() + 12.0 + ((CARD_HEIGHT - 24.0 - content_height) * 0.5).max(0.0);
+        let element_count = text.len() + usize::from(card_config.icon_visible);
+        let content_height = text
+            .iter()
+            .map(|(prepared, _)| prepared_text_size(prepared).y)
+            .sum::<f32>()
+            + if card_config.icon_visible {
+                card_config.icon_height
+            } else {
+                0.0
+            }
+            + element_count.saturating_sub(1) as f32 * card_config.text_gap;
+        let available_height = (card.height() - card_config.padding_y * 2.0).max(0.0);
+        let mut y = card.top()
+            + card_config.padding_y
+            + ((available_height - content_height) * 0.5).max(0.0);
         let center_x = card.center().x;
 
-        // Slint's default image-fit is `fill` when both dimensions are explicit.
-        let icon_rect = Rect::from_center_size(pos2(center_x, y + 18.0), vec2(36.0, 36.0));
-        painter.image(
-            item.icon.id(),
-            icon_rect,
-            Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
-        y += 38.0;
+        if card_config.icon_visible {
+            // Slint's default image-fit is `fill` when both dimensions are explicit.
+            let icon_rect = Rect::from_center_size(
+                pos2(center_x, y + card_config.icon_height * 0.5),
+                vec2(card_config.icon_width, card_config.icon_height),
+            );
+            painter.image(
+                item.icon.id(),
+                icon_rect,
+                Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            y += card_config.icon_height;
+            if !text.is_empty() {
+                y += card_config.text_gap;
+            }
+        }
 
         let text_clip = Rect::from_min_max(
-            pos2(card.left() + 6.0, card.top() + 12.0),
-            pos2(card.right() - 6.0, card.bottom() - 12.0),
+            pos2(
+                card.left() + card_config.padding_x,
+                card.top() + card_config.padding_y,
+            ),
+            pos2(
+                card.right() - card_config.padding_x,
+                card.bottom() - card_config.padding_y,
+            ),
         );
         let text_painter = painter.with_clip_rect(text_clip);
 
-        paint_prepared_text(
-            &text_painter,
-            pos2(center_x - filename_size.x * 0.5, y),
-            &filename,
-            running_color,
-        );
-        y += filename_size.y + 2.0;
-        paint_prepared_text(
-            &text_painter,
-            pos2(center_x - app_type_size.x * 0.5, y),
-            &app_type,
-            running_color,
-        );
-        y += app_type_size.y + 2.0;
-        paint_prepared_text(
-            &text_painter,
-            pos2(center_x - size_size.x * 0.5, y),
-            &size,
-            size_color,
-        );
+        let text_count = text.len();
+        for (index, (prepared, text_color)) in text.into_iter().enumerate() {
+            let text_size = prepared_text_size(&prepared);
+            paint_prepared_text(
+                &text_painter,
+                pos2(center_x - text_size.x * 0.5, y),
+                &prepared,
+                text_color,
+            );
+            y += text_size.y;
+            if index + 1 < text_count {
+                y += card_config.text_gap;
+            }
+        }
     }
 
     fn layout_text(
@@ -523,14 +633,21 @@ impl Frontend {
         content_height: f32,
         max_scroll: f32,
     ) {
+        let scrollbar = &self.config.gui.scrollbar;
         let track = Rect::from_min_size(
-            pos2(viewport.right() + 8.0, viewport.top()),
-            vec2(8.0, viewport.height()),
+            pos2(viewport.right() + scrollbar.gap, viewport.top()),
+            vec2(scrollbar.width, viewport.height()),
         );
-        ui.painter()
-            .rect_filled(track, 4.0, Color32::from_white_alpha(26));
+        ui.painter().rect_filled(
+            track,
+            scrollbar.corner_radius,
+            color32(scrollbar.track_color),
+        );
 
-        let thumb_height = (track.height() * viewport.height() / content_height).max(20.0);
+        let thumb_height = (track.height() * viewport.height()
+            / content_height.max(viewport.height()).max(f32::EPSILON))
+        .max(scrollbar.min_thumb_height)
+        .min(track.height());
         let thumb_travel = (track.height() - thumb_height).max(0.0);
         let thumb_y = if max_scroll > 0.0 {
             track.top() + self.scroll_offset / max_scroll * thumb_travel
@@ -573,13 +690,13 @@ impl Frontend {
             vec2(track.width(), thumb_height),
         );
         let thumb_color = if track_response.hovered() || thumb_response.dragged() {
-            Color32::from_white_alpha(140)
+            color32(scrollbar.thumb_hover_color)
         } else {
-            Color32::from_white_alpha(77)
+            color32(scrollbar.thumb_color)
         };
         ui.painter().rect(
             current_thumb,
-            4.0,
+            scrollbar.corner_radius,
             thumb_color,
             Stroke::new(1.0, thumb_color),
             StrokeKind::Inside,
@@ -587,16 +704,17 @@ impl Frontend {
     }
 
     fn paint_repository_link(&self, ui: &mut egui::Ui, root: Rect) {
-        let normal_color = Color32::from_white_alpha(204);
+        let footer = &self.config.gui.footer;
+        let normal_color = color32(footer.color);
         let measured_text = self.layout_text(
             ui.painter(),
-            REPOSITORY_TEXT,
-            12.0,
+            &footer.text,
+            footer.font_size,
             TextRole::Footer,
             normal_color,
             None,
         );
-        let position = pos2(root.left() + 10.0, root.bottom() - 32.0);
+        let position = pos2(root.left() + footer.left, root.bottom() - footer.bottom);
         let link_rect = Rect::from_min_size(position, prepared_text_size(&measured_text));
         let response = ui.interact(link_rect, Id::new("repository-link"), Sense::click());
 
@@ -604,19 +722,19 @@ impl Frontend {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
         if response.clicked() {
-            crate::search::open_path(REPOSITORY_URL.into(), false);
+            crate::search::open_path(footer.url.clone(), false, false);
         }
 
         let color = if response.hovered() {
-            Color32::WHITE
+            color32(footer.hover_color)
         } else {
             normal_color
         };
         let text = if response.hovered() {
             self.layout_text(
                 ui.painter(),
-                REPOSITORY_TEXT,
-                12.0,
+                &footer.text,
+                footer.font_size,
                 TextRole::Footer,
                 color,
                 None,
@@ -687,10 +805,13 @@ fn spawn_search(
                 is_running: info.is_running,
                 is_dir: info.is_dir,
                 filename,
-                raw_size: (size / 1024) as i32,
             });
 
-            if batch.len() >= 20 || last_flush.elapsed() >= Duration::from_millis(50) {
+            if config.gui.progress.show_partial_results
+                && (batch.len() >= config.gui.progress.batch_size
+                    || last_flush.elapsed()
+                        >= Duration::from_millis(config.gui.progress.batch_interval_ms))
+            {
                 let _ = sender.send(SearchMessage::Batch {
                     items: std::mem::take(&mut batch),
                     count,
@@ -728,27 +849,69 @@ fn spawn_search(
     });
 }
 
-fn format_size(len: u64) -> String {
+fn format_size(len: u64, config: &crate::config::SizeFormatConfig) -> String {
     if len == 0 {
-        return "0.00 B".into();
+        return format!("{:.*} {}", config.decimal_places, 0.0, config.units[0]);
     }
 
-    let sizes = ["B", "KB", "MB", "GB", "TB"];
     let mut order = 0;
     let mut value = len as f64;
-    while value >= 1024.0 && order < sizes.len() - 1 {
+    let base = f64::from(config.base);
+    while value >= base && order < config.units.len() - 1 {
         order += 1;
-        value /= 1024.0;
+        value /= base;
     }
-    format!("{value:.2} {}", sizes[order])
+    format!(
+        "{:.*} {}",
+        config.decimal_places, value, config.units[order]
+    )
 }
 
-fn title_font_size(window_size: Vec2) -> f32 {
-    let width_scale = window_size.x / WINDOW_WIDTH;
-    let height_scale = window_size.y / WINDOW_HEIGHT;
-    (TITLE_FONT_SIZE * width_scale.min(height_scale))
-        .clamp(MIN_TITLE_FONT_SIZE, MAX_TITLE_FONT_SIZE)
+fn format_status_template(
+    template: &str,
+    count: usize,
+    size: u64,
+    size_config: &crate::config::SizeFormatConfig,
+) -> String {
+    template
+        .replace("{count}", &count.to_string())
+        .replace("{size}", &format_size(size, size_config))
+}
+
+fn sort_apps(apps: &mut [AppItem], key: SortKey, order: SortOrder) {
+    apps.sort_by(|left, right| {
+        let ordering = match key {
+            SortKey::Size => left.size.cmp(&right.size),
+            SortKey::Name => left.filename.cmp(&right.filename),
+            SortKey::Type => left.app_type.cmp(&right.app_type),
+            SortKey::Path => left.file.cmp(&right.file),
+            SortKey::Running => left.is_running.cmp(&right.is_running),
+        };
+        match order {
+            SortOrder::Ascending => ordering,
+            SortOrder::Descending => ordering.reverse(),
+        }
+    });
+}
+
+fn title_font_size(
+    window_size: Vec2,
+    status: &crate::config::StatusConfig,
+    window: &crate::config::WindowConfig,
+) -> f32 {
+    if !status.dynamic_font_size {
+        return status.font_size;
+    }
+    let width_scale = window_size.x / window.width;
+    let height_scale = window_size.y / window.height;
+    (status.font_size * width_scale.min(height_scale))
+        .clamp(status.min_font_size, status.max_font_size)
         .round()
+}
+
+fn color32(color: RgbaColor) -> Color32 {
+    let [red, green, blue, alpha] = color.channels();
+    Color32::from_rgba_unmultiplied(red, green, blue, alpha)
 }
 
 fn scroll_from_thumb_drag(
@@ -772,22 +935,34 @@ fn hash_raw_icon(icon: &RawIcon) -> u64 {
     hasher.finish()
 }
 
-fn load_texture(ctx: &egui::Context, name: &str, image: ColorImage) -> TextureHandle {
-    ctx.load_texture(name, image, TextureOptions::LINEAR)
+fn texture_options(filter: TextureFilter) -> TextureOptions {
+    match filter {
+        TextureFilter::Linear => TextureOptions::LINEAR,
+        TextureFilter::Nearest => TextureOptions::NEAREST,
+    }
 }
 
-fn decode_icon(raw: &RawIcon) -> Option<ColorImage> {
+fn load_texture(
+    ctx: &egui::Context,
+    name: &str,
+    image: ColorImage,
+    options: TextureOptions,
+) -> TextureHandle {
+    ctx.load_texture(name, image, options)
+}
+
+fn decode_icon(raw: &RawIcon, max_size: u32) -> Option<ColorImage> {
     match raw {
-        RawIcon::Svg(bytes) => decode_svg(bytes),
-        RawIcon::PngOrIco(bytes) => decode_raster(bytes, true),
+        RawIcon::Svg(bytes) => decode_svg(bytes, max_size),
+        RawIcon::PngOrIco(bytes) => decode_raster(bytes, true, max_size),
         RawIcon::Empty => None,
     }
 }
 
-fn decode_raster(bytes: &[u8], thumbnail: bool) -> Option<ColorImage> {
+fn decode_raster(bytes: &[u8], thumbnail: bool, max_size: u32) -> Option<ColorImage> {
     let mut image = image::load_from_memory(bytes).ok()?;
-    if thumbnail && (image.width() > 64 || image.height() > 64) {
-        image = image.thumbnail(64, 64);
+    if thumbnail && (image.width() > max_size || image.height() > max_size) {
+        image = image.thumbnail(max_size, max_size);
     }
 
     let rgba = image.into_rgba8();
@@ -795,7 +970,7 @@ fn decode_raster(bytes: &[u8], thumbnail: bool) -> Option<ColorImage> {
     Some(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
-fn decode_svg(bytes: &[u8]) -> Option<ColorImage> {
+fn decode_svg(bytes: &[u8], max_size: u32) -> Option<ColorImage> {
     let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
     let source_size = tree.size();
     let max_side = source_size.width().max(source_size.height());
@@ -803,7 +978,7 @@ fn decode_svg(bytes: &[u8]) -> Option<ColorImage> {
         return None;
     }
 
-    let scale = 64.0 / max_side;
+    let scale = max_size as f32 / max_side;
     let width = (source_size.width() * scale).round().max(1.0) as u32;
     let height = (source_size.height() * scale).round().max(1.0) as u32;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
@@ -819,10 +994,40 @@ fn decode_svg(bytes: &[u8]) -> Option<ColorImage> {
     ))
 }
 
-fn paint_cover_image(painter: &egui::Painter, rect: Rect, texture: &TextureHandle) {
+fn paint_background(
+    painter: &egui::Painter,
+    rect: Rect,
+    texture: &TextureHandle,
+    fit: BackgroundFit,
+    fallback: Color32,
+) {
+    painter.rect_filled(rect, 0.0, fallback);
+    if fit == BackgroundFit::Stretch {
+        painter.image(
+            texture.id(),
+            rect,
+            Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        return;
+    }
     let texture_size = texture.size_vec2();
     let texture_aspect = texture_size.x / texture_size.y;
     let target_aspect = rect.width() / rect.height().max(f32::EPSILON);
+    if fit == BackgroundFit::Contain {
+        let size = if texture_aspect > target_aspect {
+            vec2(rect.width(), rect.width() / texture_aspect)
+        } else {
+            vec2(rect.height() * texture_aspect, rect.height())
+        };
+        painter.image(
+            texture.id(),
+            Rect::from_center_size(rect.center(), size),
+            Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        return;
+    }
     let uv = if texture_aspect > target_aspect {
         let visible = target_aspect / texture_aspect;
         let margin = (1.0 - visible) * 0.5;
@@ -931,19 +1136,73 @@ fn bold_system_fonts() -> Vec<SystemFont> {
 
 fn configure_text_renderer(
     ctx: &egui::Context,
-    use_system_fonts: bool,
+    config: &crate::config::FontConfig,
 ) -> Result<TextRenderer, GuiError> {
-    if use_system_fonts {
-        #[cfg(target_os = "macos")]
-        return Ok(TextRenderer::CoreText(RefCell::new(
-            macos_text::CoreTextRenderer::new(),
-        )));
+    match config.mode {
+        FontMode::Embedded => Ok(TextRenderer::Egui(configure_embedded_fonts(ctx))),
+        FontMode::Custom => configure_custom_fonts(ctx, config).map(TextRenderer::Egui),
+        FontMode::System => {
+            #[cfg(target_os = "macos")]
+            return Ok(TextRenderer::CoreText(RefCell::new(
+                macos_text::CoreTextRenderer::new(),
+            )));
 
-        #[cfg(not(target_os = "macos"))]
-        return configure_system_fonts(ctx).map(TextRenderer::Egui);
+            #[cfg(not(target_os = "macos"))]
+            return configure_system_fonts(ctx).map(TextRenderer::Egui);
+        }
     }
+}
 
-    Ok(TextRenderer::Egui(configure_embedded_fonts(ctx)))
+fn configure_custom_fonts(
+    ctx: &egui::Context,
+    config: &crate::config::FontConfig,
+) -> Result<EguiFonts, GuiError> {
+    let faces = [
+        ("title", &config.title),
+        ("card-regular", &config.card_regular),
+        ("card-bold", &config.card_bold),
+        ("footer", &config.footer),
+    ];
+    let mut definitions = FontDefinitions::empty();
+    let mut families = Vec::new();
+    for (name, face) in faces {
+        let path = face.path.as_ref().ok_or_else(|| {
+            GuiError(format!(
+                "custom font {name} has no path after configuration validation"
+            ))
+        })?;
+        let bytes = std::fs::read(path).map_err(|error| {
+            GuiError(format!(
+                "failed to read custom font {}: {error}",
+                path.display()
+            ))
+        })?;
+        let data_name = format!("cefdetector-custom-{name}");
+        let family = FontFamily::Name(data_name.clone().into());
+        let mut data = FontData::from_owned(bytes);
+        data.index = face.index;
+        definitions
+            .font_data
+            .insert(data_name.clone(), Arc::new(data));
+        definitions.families.insert(family.clone(), vec![data_name]);
+        families.push(family);
+    }
+    definitions.families.insert(
+        FontFamily::Proportional,
+        vec!["cefdetector-custom-card-regular".into()],
+    );
+    definitions.families.insert(
+        FontFamily::Monospace,
+        vec!["cefdetector-custom-card-regular".into()],
+    );
+    ctx.set_fonts(definitions);
+
+    Ok(EguiFonts {
+        title: families.remove(0),
+        card_regular: families.remove(0),
+        card_bold: families.remove(0),
+        footer: families.remove(0),
+    })
 }
 
 fn configure_embedded_fonts(ctx: &egui::Context) -> EguiFonts {
@@ -1114,6 +1373,7 @@ impl EguiRenderer {
     fn new(
         event_loop: &winit::event_loop::ActiveEventLoop,
         gl: Arc<egui_glow::glow::Context>,
+        report_graphics: bool,
     ) -> Result<Self, GuiError> {
         use egui_glow::glow::HasContext as _;
 
@@ -1127,7 +1387,9 @@ impl EguiRenderer {
                 gl.get_parameter_string(egui_glow::glow::VENDOR),
             )
         };
-        eprintln!("Detected OpenGL {graphics}");
+        if report_graphics {
+            eprintln!("cefdetector-graphics={graphics}");
+        }
         let painter = egui_glow::Painter::new(Arc::clone(&gl), "", None, true).map_err(|error| {
             let platform_hint = if cfg!(target_os = "windows") {
                 " Windows requires a graphics driver that exposes OpenGL 2.0 or newer; \
@@ -1228,16 +1490,30 @@ struct GlutinWindow {
 }
 
 impl GlutinWindow {
-    fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> Result<Self, GuiError> {
+    fn new(
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        config: &AppConfig,
+    ) -> Result<Self, GuiError> {
         use glutin::config::GlConfig as _;
         use glutin::context::NotCurrentGlContext as _;
         use glutin::display::{GetGlDisplay as _, GlDisplay as _};
         use glutin::prelude::GlSurface as _;
 
         let window_attributes = winit::window::WindowAttributes::default()
-            .with_title(WINDOW_TITLE)
-            .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .with_resizable(true)
+            .with_title(&config.gui.window.title)
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                config.gui.window.width,
+                config.gui.window.height,
+            ))
+            .with_resizable(config.gui.window.resizable)
+            .with_maximized(config.gui.window.maximized)
+            .with_fullscreen(
+                config
+                    .gui
+                    .window
+                    .fullscreen
+                    .then_some(winit::window::Fullscreen::Borderless(None)),
+            )
             .with_visible(false)
             .with_window_icon(window_icon());
 
@@ -1255,8 +1531,11 @@ impl GlutinWindow {
         let display_builder = glutin_winit::DisplayBuilder::new();
         #[cfg(target_os = "linux")]
         let display_builder =
-            display_builder.with_preference(glutin_winit::ApiPreference::FallbackEgl);
-        let (mut window, config) = display_builder
+            display_builder.with_preference(match config.gui.graphics.linux_display {
+                LinuxDisplay::Egl => glutin_winit::ApiPreference::PreferEgl,
+                LinuxDisplay::Auto | LinuxDisplay::Glx => glutin_winit::ApiPreference::FallbackEgl,
+            });
+        let (mut window, gl_config) = display_builder
             .with_window_attributes(Some(window_attributes.clone()))
             .build(event_loop, config_template, |configs| {
                 configs
@@ -1275,7 +1554,7 @@ impl GlutinWindow {
                 ))
             })?;
 
-        let display = config.display();
+        let display = gl_config.display();
         let raw_window_handle = window
             .as_ref()
             .map(|window| {
@@ -1286,7 +1565,7 @@ impl GlutinWindow {
             })
             .transpose()?;
         #[cfg(not(target_os = "macos"))]
-        let context_attributes = glutin::context::ContextAttributesBuilder::new()
+        let desktop_attributes = glutin::context::ContextAttributesBuilder::new()
             .with_context_api(glutin::context::ContextApi::OpenGl(Some(
                 glutin::context::Version::new(2, 0),
             )))
@@ -1299,7 +1578,7 @@ impl GlutinWindow {
             .with_profile(glutin::context::GlProfile::Core)
             .build(raw_window_handle);
         #[cfg(not(target_os = "macos"))]
-        let fallback_attributes = glutin::context::ContextAttributesBuilder::new()
+        let gles_attributes = glutin::context::ContextAttributesBuilder::new()
             .with_context_api(glutin::context::ContextApi::Gles(Some(
                 glutin::context::Version::new(2, 0),
             )))
@@ -1308,33 +1587,60 @@ impl GlutinWindow {
         // SAFETY: The attributes use the live window handle returned by winit and
         // the context remains owned alongside that window and display.
         #[cfg(not(target_os = "macos"))]
-        let not_current = unsafe { display.create_context(&config, &context_attributes) }.or_else(
-            |desktop_error| {
-                // SAFETY: This uses the same live window handle and GL config.
-                unsafe { display.create_context(&config, &fallback_attributes) }.map_err(
-                    |gles_error| {
+        let not_current = match config.gui.graphics.api {
+            GraphicsApi::Opengl => {
+                // SAFETY: The attributes use the live window handle and GL config.
+                unsafe { display.create_context(&gl_config, &desktop_attributes) }.map_err(
+                    |error| GuiError(format!("failed to create an OpenGL 2.0 context: {error}")),
+                )?
+            }
+            GraphicsApi::Gles => {
+                // SAFETY: The attributes use the live window handle and GL config.
+                unsafe { display.create_context(&gl_config, &gles_attributes) }.map_err(
+                    |error| {
                         GuiError(format!(
-                            "failed to create an OpenGL 2.0 context ({desktop_error}) \
-                             or an OpenGL ES 2.0 context ({gles_error})"
+                            "failed to create an OpenGL ES 2.0 context: {error}"
                         ))
                     },
-                )
-            },
-        )?;
+                )?
+            }
+            GraphicsApi::Auto => {
+                // SAFETY: Both attribute sets use the live window handle and GL config.
+                unsafe { display.create_context(&gl_config, &desktop_attributes) }.or_else(
+                    |desktop_error| {
+                        // SAFETY: This uses the same live window handle and GL config.
+                        unsafe { display.create_context(&gl_config, &gles_attributes) }.map_err(
+                            |gles_error| {
+                                GuiError(format!(
+                                    "failed to create an OpenGL 2.0 context ({desktop_error}) \
+                                     or an OpenGL ES 2.0 context ({gles_error})"
+                                ))
+                            },
+                        )
+                    },
+                )?
+            }
+        };
         #[cfg(target_os = "macos")]
         // SAFETY: The attributes use the live AppKit window handle returned by
         // winit, and the CGL context remains owned alongside that window.
-        let not_current =
-            unsafe { display.create_context(&config, &context_attributes) }.map_err(|error| {
+        let not_current = {
+            if config.gui.graphics.api == GraphicsApi::Gles {
+                return Err(GuiError(
+                    "OpenGL ES contexts are not supported by the macOS GUI backend".into(),
+                ));
+            }
+            unsafe { display.create_context(&gl_config, &context_attributes) }.map_err(|error| {
                 GuiError(format!(
                     "failed to create an OpenGL 3.2 Core context: {error}"
                 ))
-            })?;
+            })?
+        };
 
         let window = if let Some(window) = window.take() {
             window
         } else {
-            glutin_winit::finalize_window(event_loop, window_attributes, &config)
+            glutin_winit::finalize_window(event_loop, window_attributes, &gl_config)
                 .map_err(|error| GuiError(format!("failed to create the native window: {error}")))?
         };
         let size = window.inner_size();
@@ -1351,7 +1657,7 @@ impl GlutinWindow {
         // SAFETY: The surface uses the live window handle and matching GL config.
         let surface = unsafe {
             display
-                .create_window_surface(&config, &surface_attributes)
+                .create_window_surface(&gl_config, &surface_attributes)
                 .map_err(|error| {
                     GuiError(format!(
                         "failed to create the OpenGL window surface: {error}"
@@ -1363,10 +1669,12 @@ impl GlutinWindow {
                 "failed to make the OpenGL context current: {error}"
             ))
         })?;
-        let _ = surface.set_swap_interval(
-            &context,
-            glutin::surface::SwapInterval::Wait(NonZeroU32::MIN),
-        );
+        let swap_interval = if config.gui.graphics.vsync {
+            glutin::surface::SwapInterval::Wait(NonZeroU32::MIN)
+        } else {
+            glutin::surface::SwapInterval::DontWait
+        };
+        let _ = surface.set_swap_interval(&context, swap_interval);
 
         Ok(Self {
             surface,
@@ -1436,7 +1744,7 @@ impl GlowApplication {
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> Result<(), GuiError> {
-        let gl_window = GlutinWindow::new(event_loop)?;
+        let gl_window = GlutinWindow::new(event_loop, &self.config)?;
         // SAFETY: The loader resolves symbols from the current context created above.
         let gl = unsafe {
             egui_glow::glow::Context::from_loader_function(|symbol| {
@@ -1447,7 +1755,11 @@ impl GlowApplication {
             })
         };
         let gl = Arc::new(gl);
-        let mut egui = EguiRenderer::new(event_loop, Arc::clone(&gl))?;
+        let mut egui = EguiRenderer::new(
+            event_loop,
+            Arc::clone(&gl),
+            self.config.diagnostics.report_graphics,
+        )?;
 
         let proxy = self.proxy.clone();
         egui.egui_ctx.set_request_repaint_callback(move |request| {
@@ -1673,18 +1985,22 @@ mod tests {
 
     #[test]
     fn size_format_matches_the_original_ui() {
-        assert_eq!(format_size(0), "0.00 B");
-        assert_eq!(format_size(1024), "1.00 KB");
-        assert_eq!(format_size(1536), "1.50 KB");
+        let config = crate::config::SizeFormatConfig::default();
+        assert_eq!(format_size(0, &config), "0.00 B");
+        assert_eq!(format_size(1024, &config), "1.00 KB");
+        assert_eq!(format_size(1536, &config), "1.50 KB");
     }
 
     #[test]
     fn title_font_tracks_proportional_window_growth() {
-        assert_eq!(title_font_size(egui::vec2(800.0, 600.0)), 18.0);
-        assert_eq!(title_font_size(egui::vec2(1_600.0, 1_200.0)), 36.0);
-        assert_eq!(title_font_size(egui::vec2(1_600.0, 600.0)), 18.0);
-        assert_eq!(title_font_size(egui::vec2(400.0, 300.0)), 12.0);
-        assert_eq!(title_font_size(egui::vec2(8_000.0, 6_000.0)), 64.0);
+        let status = crate::config::StatusConfig::default();
+        let window = crate::config::WindowConfig::default();
+        let size = |width, height| title_font_size(egui::vec2(width, height), &status, &window);
+        assert_eq!(size(800.0, 600.0), 18.0);
+        assert_eq!(size(1_600.0, 1_200.0), 36.0);
+        assert_eq!(size(1_600.0, 600.0), 18.0);
+        assert_eq!(size(400.0, 300.0), 12.0);
+        assert_eq!(size(8_000.0, 6_000.0), 64.0);
     }
 
     #[test]
