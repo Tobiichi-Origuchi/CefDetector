@@ -665,7 +665,7 @@ bench_measure() {
         [[ -f "${result_file}" ]] ||
             bench_fail "${backend} scan did not create ${result_file}"
         result_count=$(
-            awk '/"file":[[:space:]]/{ count++ } END { print count + 0 }' \
+            awk '{ count += gsub(/"file":/, "") } END { print count + 0 }' \
                 "${result_file}"
         )
     elif [[ "${measure_mode}" == "gui" ]]; then
