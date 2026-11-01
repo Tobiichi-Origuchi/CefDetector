@@ -978,7 +978,14 @@ fn decode_raster(bytes: &[u8], thumbnail: bool, max_size: u32) -> Option<ColorIm
 }
 
 fn decode_svg(bytes: &[u8], max_size: u32) -> Option<ColorImage> {
-    let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
+    let options = resvg::usvg::Options {
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_string: Box::new(|_, _| None),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
     let source_size = tree.size();
     let max_side = source_size.width().max(source_size.height());
     if max_side <= 0.0 {
@@ -1980,14 +1987,63 @@ pub fn run(config: crate::config::AppConfig) -> Result<(), Box<dyn std::error::E
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use super::{
         ControlFlow, REPOSITORY_TEXT, SEARCHING_TEXT, TextRole, configure_embedded_fonts,
-        consume_repaint_deadline, format_size, schedule_repaint, scroll_from_thumb_drag,
-        title_font_size,
+        consume_repaint_deadline, decode_svg, format_size, schedule_repaint,
+        scroll_from_thumb_drag, title_font_size,
     };
+
+    #[test]
+    fn svg_icons_skip_external_images() {
+        let path = std::env::temp_dir().join(format!(
+            "cefdetector-svg-external-{}.svg",
+            std::process::id()
+        ));
+        let mut file = std::fs::File::create_new(&path).unwrap();
+        file.write_all(br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#).unwrap();
+        drop(file);
+        let href = path
+            .to_string_lossy()
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><rect width="8" height="8" fill="blue"/><image width="8" height="8" xlink:href="{href}"/></svg>"#
+        );
+        let image = decode_svg(svg.as_bytes(), 8);
+        std::fs::remove_file(path).unwrap();
+
+        let image = image.unwrap();
+        assert_eq!(image.size, [8, 8]);
+        assert!(
+            image
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == egui::Color32::BLUE)
+        );
+    }
+
+    #[test]
+    fn svg_icons_keep_vectors_and_embedded_images() {
+        for svg in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image width="8" height="8" xlink:href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='8'%20height='8'%3E%3Crect%20width='8'%20height='8'%20fill='red'/%3E%3C/svg%3E"/></svg>"#,
+        ] {
+            let image = decode_svg(svg.as_bytes(), 8).unwrap();
+            assert_eq!(image.size, [8, 8]);
+            assert!(
+                image
+                    .pixels
+                    .iter()
+                    .all(|pixel| *pixel == egui::Color32::RED)
+            );
+        }
+    }
 
     fn repaint_request(delay: Duration, pass_nr: u64) -> egui::RequestRepaintInfo {
         egui::RequestRepaintInfo {

@@ -281,6 +281,7 @@ linux_display = "auto"
 enabled = true
 # Maximum decoded icon side in pixels. Allowed range: 1..4096.
 decode_max_size = 64
+# SVG icons ignore external images; supported data URLs remain embedded.
 # Optional absolute fallback PNG/ICO/WebP/SVG path (ICNS is also allowed on
 # macOS). Omit it to use the embedded fallback icon.
 # fallback_path = "/absolute/path/to/fallback.png"
