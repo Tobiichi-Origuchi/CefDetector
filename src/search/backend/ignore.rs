@@ -136,6 +136,7 @@ fn path_starts_with_ignore_ascii_case(path: &std::path::Path, root: &std::path::
     use std::os::windows::ffi::OsStrExt as _;
 
     let mut path_units = path.as_os_str().encode_wide();
+    let mut root_ends_with_separator = false;
     for expected in root.as_os_str().encode_wide() {
         let Some(actual) = path_units.next() else {
             return false;
@@ -143,10 +144,13 @@ fn path_starts_with_ignore_ascii_case(path: &std::path::Path, root: &std::path::
         if ascii_path_unit(actual) != ascii_path_unit(expected) {
             return false;
         }
+        root_ends_with_separator = ascii_path_unit(expected) == u16::from(b'\\');
     }
-    path_units
-        .next()
-        .is_none_or(|unit| ascii_path_unit(unit) == u16::from(b'\\'))
+    // A trailing separator in the root already establishes the directory boundary.
+    root_ends_with_separator
+        || path_units
+            .next()
+            .is_none_or(|unit| ascii_path_unit(unit) == u16::from(b'\\'))
 }
 
 #[cfg(target_os = "windows")]
@@ -399,6 +403,108 @@ mod tests {
             r"C:\Program Files\WindowsApps"
         )));
         assert!(!is_excluded(std::path::Path::new(r"D:\Windows\WinSxS")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_prefixes_respect_directory_boundaries() {
+        for (path, root, expected) in [
+            (r"C:\Apps\Demo\libcef.dll", r"C:\", true),
+            (r"C:\Apps\Demo\libcef.dll", r"C:\Apps\", true),
+            (r"C:\Apps\Demo\libcef.dll", r"C:\Apps", true),
+            (r"c:\APPS\Demo\libcef.dll", r"C:\Apps\", true),
+            (r"C:/Apps\Demo/libcef.dll", r"c:\apps/", true),
+            (r"C:\Apps", r"c:\apps", true),
+            (r"C:\Apps\", r"c:\apps\", true),
+            (r"C:\示例😀\Demo\libcef.dll", r"c:\示例😀\", true),
+            (r"\\server\share\Apps\libcef.dll", r"\\server\share\", true),
+            (r"\\SERVER\SHARE\Apps\libcef.dll", r"\\server\share", true),
+            (r"\\?\C:\Apps\libcef.dll", r"\\?\C:\", true),
+            (
+                r"\\?\UNC\server\share\Apps\libcef.dll",
+                r"\\?\UNC\server\share\",
+                true,
+            ),
+            (r"C:\AppsBackup\libcef.dll", r"C:\Apps", false),
+            (r"C:\AppsBackup\libcef.dll", r"C:\Apps\", false),
+            (r"C:\App", r"C:\Apps\", false),
+            (r"D:\Apps\libcef.dll", r"C:\", false),
+            (
+                r"\\server\share-backup\libcef.dll",
+                r"\\server\share",
+                false,
+            ),
+            (
+                r"\\server\share-backup\libcef.dll",
+                r"\\server\share\",
+                false,
+            ),
+            (r"\\other\share\libcef.dll", r"\\server\share\", false),
+            (r"\\?\C:\AppsBackup\libcef.dll", r"\\?\C:\Apps", false),
+        ] {
+            assert_eq!(
+                path_starts_with_ignore_ascii_case(
+                    std::path::Path::new(path),
+                    std::path::Path::new(root),
+                ),
+                expected,
+                "{path:?} under {root:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_configured_scope_accepts_trailing_separators() {
+        for root in [r"C:\", r"C:\Apps\", r"c:/apps/"] {
+            let config = crate::config::SearchConfig {
+                roots: Some(vec![PathBuf::from(root)]),
+                exclude_paths: vec![PathBuf::from(r"C:\Apps\private\")],
+                use_platform_excludes: false,
+                ..Default::default()
+            };
+            let filter = super::CandidateFilter::load(&config);
+
+            assert!(filter.allows(std::path::Path::new(r"C:\Apps\Demo\libcef.dll")));
+            assert!(filter.allows(std::path::Path::new(r"C:\Apps\private-backup\libcef.dll")));
+            assert!(!filter.allows(std::path::Path::new(r"c:\APPS\PRIVATE\libcef.dll")));
+            assert!(!filter.allows(std::path::Path::new(r"D:\Apps\Demo\libcef.dll")));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_filesystem_scan_accepts_trailing_separators() {
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "cefdetector-trailing-separator-{}-{sequence}",
+            std::process::id()
+        ));
+        let app_directory = root.join("app");
+        let excluded_directory = root.join("excluded");
+        fs::create_dir_all(&app_directory).unwrap();
+        fs::create_dir_all(&excluded_directory).unwrap();
+        let candidate = app_directory.join("libcef.dll");
+        fs::write(&candidate, []).unwrap();
+        fs::write(excluded_directory.join("libcef.dll"), []).unwrap();
+        let mut scan_root = root.as_os_str().to_os_string();
+        scan_root.push("\\");
+        let mut excluded_root = excluded_directory.into_os_string();
+        excluded_root.push("\\");
+
+        let config = crate::config::SearchConfig {
+            backend: crate::config::SearchBackend::Filesystem,
+            roots: Some(vec![PathBuf::from(scan_root)]),
+            exclude_paths: vec![PathBuf::from(excluded_root)],
+            use_platform_excludes: false,
+            ..Default::default()
+        };
+        let result = crate::search::backend::find_candidates(&config, false);
+        let _ = fs::remove_dir_all(&root);
+
+        let candidates = result.unwrap();
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].path, candidate);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
