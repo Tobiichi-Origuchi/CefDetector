@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod file_io;
 #[cfg(feature = "gui")]
 mod gui;
 

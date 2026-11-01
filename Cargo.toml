@@ -42,6 +42,9 @@ image = { version = "0.25.10", optional = true, default-features = false, featur
 egui = { version = "0.35.0", optional = true, default-features = false }
 resvg = { version = "0.48.1", optional = true, default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 backhand = { version = "0.25.1", optional = true, default-features = false, features = ["gzip", "lz4", "xz", "zstd"] }
 egui_glow = { version = "0.35.0", optional = true, default-features = false, features = ["wayland", "winit", "x11"] }

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -46,7 +48,12 @@ fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
     {
         return decode_icns(path);
     }
-    let bytes: Arc<[u8]> = fs::read(path).ok()?.into();
+    let mut bytes = Vec::new();
+    crate::file_io::open_regular_file(path)
+        .ok()?
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let bytes: Arc<[u8]> = bytes.into();
     let is_svg = path
         .extension()
         .and_then(|e| e.to_str())
@@ -61,7 +68,7 @@ fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
 
 #[cfg(target_os = "macos")]
 fn decode_icns(path: &Path) -> Option<RawIcon> {
-    let family = icns::IconFamily::read(fs::File::open(path).ok()?).ok()?;
+    let family = icns::IconFamily::read(crate::file_io::open_regular_file(path).ok()?).ok()?;
     let icon_type = family
         .available_icons()
         .into_iter()

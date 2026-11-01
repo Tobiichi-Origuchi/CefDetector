@@ -1142,18 +1142,9 @@ impl AppConfig {
 
 fn validate_readable_file(name: &str, path: &Path) -> Result<std::fs::File, ConfigError> {
     require_absolute(name, path)?;
-    let file = std::fs::File::open(path).map_err(|error| {
+    let file = crate::file_io::open_regular_file(path).map_err(|error| {
         ConfigError::new(format!("{name} cannot open {}: {error}", path.display()))
     })?;
-    let metadata = file.metadata().map_err(|error| {
-        ConfigError::new(format!("{name} cannot inspect {}: {error}", path.display()))
-    })?;
-    if !metadata.is_file() {
-        return Err(ConfigError::new(format!(
-            "{name} must point to a regular file: {}",
-            path.display()
-        )));
-    }
     Ok(file)
 }
 

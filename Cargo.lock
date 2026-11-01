@@ -256,6 +256,7 @@ dependencies = [
  "icns",
  "ignore",
  "image",
+ "libc",
  "memchr",
  "memmap2",
  "pelite",
