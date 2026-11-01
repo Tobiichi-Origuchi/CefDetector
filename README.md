@@ -16,16 +16,15 @@ Check how many CEFs are on your computer
 ## 下载
 
 [Release](https://github.com/Tobiichi-Origuchi/CefDetector/releases)
-页面提供以下构建产物：
+发布构建按以下名称打包：
 
 | 平台 | 搜索后端 | 文件名 |
 | --- | --- | --- |
-| Linux x86_64 | ignore | `cefdetector-<version>-linux-x86_64-ignore.tar.gz` |
-| Linux x86_64 | plocate | `cefdetector-<version>-linux-x86_64-plocate.tar.gz` |
-| Windows x86_64 | ignore | `cefdetector-<version>-windows-x86_64-ignore.zip` |
-| Windows x86_64 | Everything IPC | `cefdetector-<version>-windows-x86_64-everything.zip` |
-| macOS aarch64 | ignore | `cefdetector-<version>-macos-aarch64-ignore.zip` |
-| macOS aarch64 | Spotlight | `cefdetector-<version>-macos-aarch64-spotlight.zip` |
+| Linux x86_64 | ignore / plocate | `cefdetector-<version>-linux-x86_64.tar.gz` |
+| Windows x86_64 | ignore / Everything IPC | `cefdetector-<version>-windows-x86_64.zip` |
+| macOS aarch64 | ignore / Spotlight | `cefdetector-<version>-macos-aarch64.zip` |
+
+通过配置项 `search.backend` 在运行时选择 `auto`、`filesystem` 或 `index`。默认的 `auto` 优先查询平台索引；查询失败且 `search.index_fallback = true` 时回退到文件系统遍历。
 
 其他架构自行编译测试
 
@@ -68,22 +67,25 @@ spotlight 后端就是调用 mdfind 搜索，速度比 ignore 快的多
 cefdetector
 ```
 
-### Cli
+### CLI
+
+命令行扫描使用 `cli` 子命令，并指定 JSON、TOML 或 CSV 输出格式：
 
 ```bash
-$ cefdetector --help
-CEF Detector ${VERSION}
-
-Usage: cefdetector [OPTIONS]
-
-Options:
-  -h, --help       Print help information
-  -V, --version    Print version information
-  -T, --toml       Output results in TOML format
-  -J, --json       Output results in JSON format
-  -C, --csv        Output results in CSV format
-  -O, --output     Output results to the specified file path instead of stdout
+cefdetector --help
+cefdetector cli --help
+cefdetector cli --json
+cefdetector cli --toml
+cefdetector cli --csv --output results.csv
 ```
+
+`cefdetector cli` 不指定输出格式时只显示帮助。全局配置选项同样适用于 CLI，例如强制使用文件系统后端：
+
+```bash
+cefdetector --set 'search.backend="filesystem"' cli --json
+```
+
+完整配置项及默认值见 [config.toml.example](./config.toml.example)。
 
 ### 忽略目录
 
@@ -132,7 +134,7 @@ Summary:
 由于只有虚拟机，而且虚拟机中的 CEF 软件数量太少，测试结果没有代表性，如果有好心人愿意测试，可以：
 
 1. 安装 rust toolchain 1.92.0-aarch64-apple-darwin
-2. 运行 `./benchmark_macos.sh`
+2. 运行 `./benchmark-macos.sh`
 3. 将结果发在 issue
 
 ## 作者
