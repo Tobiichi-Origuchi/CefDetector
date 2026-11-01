@@ -2,7 +2,6 @@
 name = "cefdetector"
 version = "0.4.2"
 description = "Find CEF-based applications and their disk usage."
-authors = ["Origuchi"]
 license = "MIT"
 repository = "https://github.com/Tobiichi-Origuchi/CefDetector"
 edition = "2024"
