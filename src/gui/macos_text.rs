@@ -237,7 +237,9 @@ fn render_text(
             "system UI font",
         )?
     };
-    let rgba = color.to_array().map(|channel| channel as f64 / 255.0);
+    let rgba = color
+        .to_srgba_unmultiplied()
+        .map(|channel| channel as f64 / 255.0);
     // SAFETY: Component values are finite and in the documented 0...1 range.
     let foreground = unsafe {
         OwnedCf::new(
