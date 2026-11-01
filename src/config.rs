@@ -414,7 +414,8 @@ impl RgbaColor {
         let mut channels = [0_u8; 4];
         channels[3] = 255;
         for (index, pair) in digits.as_bytes().chunks_exact(2).enumerate() {
-            let pair = std::str::from_utf8(pair).expect("hex color pairs are ASCII boundaries");
+            let pair = std::str::from_utf8(pair)
+                .map_err(|_| ConfigError::new(format!("invalid color {value:?}")))?;
             channels[index] = u8::from_str_radix(pair, 16)
                 .map_err(|_| ConfigError::new(format!("invalid color {value:?}")))?;
         }
@@ -2376,7 +2377,68 @@ mod tests {
             RgbaColor::parse("#FFFFFF4D").unwrap().0,
             [255, 255, 255, 77]
         );
+        assert_eq!(RgbaColor::parse("#00abff").unwrap().0, [0, 171, 255, 255]);
+        assert_eq!(RgbaColor::parse("#00aBfF00").unwrap().0, [0, 171, 255, 0]);
+        assert_eq!(RgbaColor::parse("#000000FF").unwrap().0, [0, 0, 0, 255]);
         assert!(RgbaColor::parse("red").is_err());
+    }
+
+    #[test]
+    fn colors_reject_invalid_values_without_panicking() {
+        for value in [
+            "#中中",
+            "#中中00",
+            "#😀00",
+            "#😀😀",
+            "#A中BC",
+            "#ééé",
+            "#GG0000",
+            "#00_000",
+        ] {
+            let error = RgbaColor::parse(value).unwrap_err();
+            assert_eq!(error.to_string(), format!("error: invalid color {value:?}"));
+        }
+        for value in ["#", "#12345", "#1234567", "#123456789"] {
+            let error = RgbaColor::parse(value).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "error: colors must use #RRGGBB or #RRGGBBAA"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_colors_report_source_diagnostics() {
+        for value in [
+            "#中中",
+            "#中中00",
+            "#😀00",
+            "#😀😀",
+            "#A中BC",
+            "#ééé",
+            "#GG0000",
+        ] {
+            let literal = format!("{value:?}");
+            let message = file_error(&format!("[gui.card]\nbackground = {literal}\n"));
+            assert!(
+                message.contains("invalid explicit configuration"),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("invalid color {value:?}")),
+                "{message}"
+            );
+            assert_eq!(marked_fragment(&message), literal, "{message}");
+
+            let message = override_error(&format!("gui.card.background={literal}"));
+            assert!(message.contains("unusable --set override"), "{message}");
+            assert!(message.contains("<command line>:1:21"), "{message}");
+            assert!(
+                message.contains(&format!("invalid color {value:?}")),
+                "{message}"
+            );
+            assert_eq!(marked_fragment(&message), literal, "{message}");
+        }
     }
 
     #[test]
