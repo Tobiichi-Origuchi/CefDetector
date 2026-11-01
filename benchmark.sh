@@ -342,12 +342,13 @@ bench_collect_process_tree() {
         [[ -r "/proc/${process_id}/stat" ]] || continue
         BENCH_TREE_PIDS+=("${process_id}")
 
-        children_file="/proc/${process_id}/task/${process_id}/children"
-        children=()
-        if [[ -r "${children_file}" ]]; then
-            read -r -a children <"${children_file}" 2>/dev/null || true
-            ((${#children[@]} == 0)) || pending+=("${children[@]}")
-        fi
+        for children_file in "/proc/${process_id}/task/"[0-9]*/children; do
+            children=()
+            if [[ -r "${children_file}" ]]; then
+                read -r -a children 2>/dev/null <"${children_file}" || true
+                ((${#children[@]} == 0)) || pending+=("${children[@]}")
+            fi
+        done
     done
 }
 
