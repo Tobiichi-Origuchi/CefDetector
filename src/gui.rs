@@ -18,6 +18,7 @@ use glutin::display::Display;
 use glutin::surface::{Surface, WindowSurface};
 #[cfg(target_os = "macos")]
 use std::cell::RefCell;
+use winit::event_loop::ControlFlow;
 use winit::raw_window_handle::HasWindowHandle as _;
 
 #[cfg(target_os = "linux")]
@@ -1729,7 +1730,40 @@ impl GlutinWindow {
 
 #[derive(Debug)]
 enum UserEvent {
-    Repaint(Duration),
+    Repaint(egui::RequestRepaintInfo),
+}
+
+fn schedule_repaint(
+    control_flow: ControlFlow,
+    request: egui::RequestRepaintInfo,
+    cumulative_pass_nr: u64,
+    now: Instant,
+) -> (ControlFlow, bool) {
+    // A request issued during the last completed pass still applies to the next frame.
+    if cumulative_pass_nr > request.current_cumulative_pass_nr.saturating_add(1) {
+        return (control_flow, false);
+    }
+    if request.delay.is_zero() {
+        return (control_flow, true);
+    }
+    let Some(deadline) = now.checked_add(request.delay) else {
+        return (control_flow, false);
+    };
+    let deadline = match control_flow {
+        ControlFlow::WaitUntil(current) => current.min(deadline),
+        _ => deadline,
+    };
+    (ControlFlow::WaitUntil(deadline), false)
+}
+
+fn consume_repaint_deadline(control_flow: ControlFlow, now: Instant) -> (ControlFlow, bool) {
+    if let ControlFlow::WaitUntil(deadline) = control_flow
+        && deadline <= now
+    {
+        (ControlFlow::Wait, true)
+    } else {
+        (control_flow, false)
+    }
 }
 
 struct GlowApplication {
@@ -1783,7 +1817,7 @@ impl GlowApplication {
 
         let proxy = self.proxy.clone();
         egui.egui_ctx.set_request_repaint_callback(move |request| {
-            let _ = proxy.send_event(UserEvent::Repaint(request.delay));
+            let _ = proxy.send_event(UserEvent::Repaint(request));
         });
         let frontend = match Frontend::new(&egui.egui_ctx, Arc::clone(&self.config)) {
             Ok(frontend) => frontend,
@@ -1869,6 +1903,8 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
                 return;
             }
             winit::event::WindowEvent::RedrawRequested => {
+                // This frame also satisfies any pending delayed repaint.
+                event_loop.set_control_flow(ControlFlow::Wait);
                 match self.redraw() {
                     Ok(()) if self.exit_after_first_frame => event_loop.exit(),
                     Ok(()) => {}
@@ -1890,24 +1926,31 @@ impl winit::application::ApplicationHandler<UserEvent> for GlowApplication {
     }
 
     fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Repaint(delay) = event;
-        if delay.is_zero() {
-            if let Some(gl_window) = &self.gl_window {
-                gl_window.window.request_redraw();
-            }
-        } else if let Some(deadline) = Instant::now().checked_add(delay) {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
+        let UserEvent::Repaint(request) = event;
+        let Some(egui) = &self.egui else {
+            return;
+        };
+        let (control_flow, repaint_now) = schedule_repaint(
+            event_loop.control_flow(),
+            request,
+            egui.egui_ctx.cumulative_pass_nr(),
+            Instant::now(),
+        );
+        event_loop.set_control_flow(control_flow);
+        if repaint_now && let Some(gl_window) = &self.gl_window {
+            gl_window.window.request_redraw();
         }
     }
 
     fn new_events(
         &mut self,
-        _event_loop: &winit::event_loop::ActiveEventLoop,
-        cause: winit::event::StartCause,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _cause: winit::event::StartCause,
     ) {
-        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. })
-            && let Some(gl_window) = &self.gl_window
-        {
+        let (control_flow, repaint_now) =
+            consume_repaint_deadline(event_loop.control_flow(), Instant::now());
+        event_loop.set_control_flow(control_flow);
+        if repaint_now && let Some(gl_window) = &self.gl_window {
             gl_window.window.request_redraw();
         }
     }
@@ -1937,10 +1980,147 @@ pub fn run(config: crate::config::AppConfig) -> Result<(), Box<dyn std::error::E
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
     use super::{
-        REPOSITORY_TEXT, SEARCHING_TEXT, TextRole, configure_embedded_fonts, format_size,
-        scroll_from_thumb_drag, title_font_size,
+        ControlFlow, REPOSITORY_TEXT, SEARCHING_TEXT, TextRole, configure_embedded_fonts,
+        consume_repaint_deadline, format_size, schedule_repaint, scroll_from_thumb_drag,
+        title_font_size,
     };
+
+    fn repaint_request(delay: Duration, pass_nr: u64) -> egui::RequestRepaintInfo {
+        egui::RequestRepaintInfo {
+            viewport_id: egui::ViewportId::ROOT,
+            delay,
+            current_cumulative_pass_nr: pass_nr,
+        }
+    }
+
+    #[test]
+    fn delayed_repaint_is_consumed_once() {
+        let now = Instant::now();
+        let delay = Duration::from_millis(50);
+        let deadline = now + delay;
+        let (waiting, repaint_now) =
+            schedule_repaint(ControlFlow::Wait, repaint_request(delay, 0), 1, now);
+        assert_eq!(waiting, ControlFlow::WaitUntil(deadline));
+        assert!(!repaint_now);
+        assert_eq!(
+            consume_repaint_deadline(waiting, deadline - Duration::from_nanos(1)),
+            (waiting, false)
+        );
+
+        let (idle, repaint_now) = consume_repaint_deadline(waiting, deadline);
+        assert_eq!(idle, ControlFlow::Wait);
+        assert!(repaint_now);
+        assert_eq!(
+            consume_repaint_deadline(idle, deadline + delay),
+            (ControlFlow::Wait, false)
+        );
+    }
+
+    #[test]
+    fn repaint_requests_keep_the_earliest_deadline() {
+        let now = Instant::now();
+        let first = now + Duration::from_millis(50);
+        let (waiting, _) = schedule_repaint(
+            ControlFlow::Wait,
+            repaint_request(Duration::from_millis(50), 0),
+            1,
+            now,
+        );
+        let (waiting, repaint_now) = schedule_repaint(
+            waiting,
+            repaint_request(Duration::from_millis(200), 0),
+            1,
+            now + Duration::from_millis(10),
+        );
+        assert_eq!(waiting, ControlFlow::WaitUntil(first));
+        assert!(!repaint_now);
+
+        let (waiting, repaint_now) = schedule_repaint(
+            waiting,
+            repaint_request(Duration::from_millis(10), 0),
+            1,
+            now + Duration::from_millis(20),
+        );
+        assert_eq!(
+            waiting,
+            ControlFlow::WaitUntil(now + Duration::from_millis(30))
+        );
+        assert!(!repaint_now);
+    }
+
+    #[test]
+    fn immediate_repaint_preserves_the_pending_deadline_until_redraw() {
+        let now = Instant::now();
+        let waiting = ControlFlow::WaitUntil(now + Duration::from_millis(50));
+        assert_eq!(
+            schedule_repaint(waiting, repaint_request(Duration::ZERO, 1), 1, now),
+            (waiting, true)
+        );
+        assert_eq!(
+            schedule_repaint(
+                ControlFlow::Wait,
+                repaint_request(Duration::ZERO, 1),
+                2,
+                now
+            ),
+            (ControlFlow::Wait, true)
+        );
+    }
+
+    #[test]
+    fn stale_repaint_requests_do_not_change_the_pending_deadline() {
+        let now = Instant::now();
+        let waiting = ControlFlow::WaitUntil(now + Duration::from_millis(50));
+        for delay in [Duration::ZERO, Duration::from_millis(10)] {
+            assert_eq!(
+                schedule_repaint(waiting, repaint_request(delay, 1), 3, now),
+                (waiting, false)
+            );
+        }
+        assert_eq!(
+            schedule_repaint(waiting, repaint_request(Duration::MAX, 3), 3, now),
+            (waiting, false)
+        );
+    }
+
+    #[test]
+    fn egui_repaint_request_survives_its_own_pass() {
+        let ctx = egui::Context::default();
+        // Let egui finish its initial immediate repaints before requesting a delay.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |_| {});
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        ctx.set_request_repaint_callback(move |request| {
+            captured.lock().unwrap().push(request);
+        });
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        });
+        let request = *requests.lock().unwrap().last().unwrap();
+        assert!(!request.delay.is_zero());
+        assert_eq!(
+            ctx.cumulative_pass_nr(),
+            request.current_cumulative_pass_nr + 1
+        );
+
+        let now = Instant::now();
+        assert_eq!(
+            schedule_repaint(ControlFlow::Wait, request, ctx.cumulative_pass_nr(), now),
+            (ControlFlow::WaitUntil(now + request.delay), false)
+        );
+
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        assert_eq!(
+            schedule_repaint(ControlFlow::Wait, request, ctx.cumulative_pass_nr(), now),
+            (ControlFlow::Wait, false)
+        );
+    }
 
     #[test]
     fn embedded_font_subsets_stay_small() {
