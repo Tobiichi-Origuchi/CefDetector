@@ -492,9 +492,32 @@ pub fn find_icon_via_pe(exe_path: &Path) -> Option<RawIcon> {
 }
 
 #[cfg(target_os = "linux")]
+fn find_squashfs_offset(mut reader: impl std::io::Read) -> Option<u64> {
+    let mut buffer = [0; 8192];
+    let mut retained = 0;
+    let mut offset = 0;
+    let finder = memchr::memmem::Finder::new(b"hsqs");
+    loop {
+        let count = match reader.read(&mut buffer[retained..]) {
+            Ok(0) => return None,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        let end = retained + count;
+        if let Some(position) = finder.find(&buffer[..end]) {
+            return Some(offset + position as u64);
+        }
+        // Keep partial matches across read boundaries.
+        retained = end.min(3);
+        buffer.copy_within(end - retained..end, 0);
+        offset += (end - retained) as u64;
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
     use backhand::{InnerNode, Squashfs};
-    use memmap2::MmapOptions;
     use std::io::{Read, Seek, SeekFrom};
 
     let path_str = exe_path.to_string_lossy();
@@ -503,12 +526,10 @@ pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
     }
 
     let mut file = fs::File::open(exe_path).ok()?;
-    let mmap = unsafe { MmapOptions::new().map(&file).ok()? };
+    let length = file.metadata().ok()?.len();
+    let offset = find_squashfs_offset((&mut file).take(length))?;
 
-    // Find squashfs magic 'hsqs'
-    let offset = memchr::memmem::find(&mmap, b"hsqs")?;
-
-    file.seek(SeekFrom::Start(offset as u64)).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
 
     let mut buf_reader = std::io::BufReader::new(file);
     let squashfs = Squashfs::from_reader(&mut buf_reader).ok()?;
@@ -792,8 +813,65 @@ mod input_tests {
 mod tests {
     use super::{
         RawIcon, clear_icon_caches, configured_fallback_icon, desktop_exec_tokens, executable_name,
-        find_neighboring_icon, parse_desktop_entry,
+        find_neighboring_icon, find_squashfs_offset, parse_desktop_entry,
     };
+
+    #[test]
+    fn squashfs_magic_search_handles_boundaries_and_returns_the_first_match() {
+        for position in [
+            0, 1, 8188, 8189, 8190, 8191, 8192, 8193, 16378, 16379, 16380, 16381,
+        ] {
+            let mut bytes = vec![b'x'; position];
+            bytes.extend_from_slice(b"hsqs followed by another hsqs");
+            assert_eq!(
+                find_squashfs_offset(bytes.as_slice()),
+                Some(position as u64)
+            );
+        }
+        for bytes in [b"".as_slice(), b"h", b"hs", b"hsq", b"no hsx magic"] {
+            assert_eq!(find_squashfs_offset(bytes), None);
+        }
+    }
+
+    #[test]
+    fn squashfs_magic_search_handles_short_and_interrupted_reads() {
+        use std::io::{self, Read};
+
+        struct ChunkedReader<'a> {
+            bytes: &'a [u8],
+            maximum: usize,
+            reads: usize,
+            error: io::ErrorKind,
+        }
+
+        impl Read for ChunkedReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 2 {
+                    return Err(self.error.into());
+                }
+                let count = buffer.len().min(self.maximum);
+                self.bytes.read(&mut buffer[..count])
+            }
+        }
+
+        for maximum in 1..=7 {
+            let reader = ChunkedReader {
+                bytes: b"___hsqs___hsqs",
+                maximum,
+                reads: 0,
+                error: io::ErrorKind::Interrupted,
+            };
+            assert_eq!(find_squashfs_offset(reader), Some(3), "{maximum}");
+        }
+        let broken = ChunkedReader {
+            bytes: b"___hsqs",
+            maximum: 1,
+            reads: 0,
+            error: io::ErrorKind::PermissionDenied,
+        };
+        assert_eq!(find_squashfs_offset(broken), None);
+    }
 
     #[test]
     fn desktop_exec_parser_handles_quotes_and_env() {
