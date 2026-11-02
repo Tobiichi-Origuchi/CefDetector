@@ -76,9 +76,28 @@ fn try_icon_from_path(path: &Path, maximum: u64) -> Option<RawIcon> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn checked_icns_family(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.get(..4)? != b"icns" {
+        return None;
+    }
+    let family_length = u32::from_be_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    let family = bytes.get(..family_length)?;
+    let mut elements = family.get(8..)?;
+    while !elements.is_empty() {
+        let element_length = u32::from_be_bytes(elements.get(4..8)?.try_into().ok()?) as usize;
+        if element_length < 8 {
+            return None;
+        }
+        elements = elements.get(element_length..)?;
+    }
+    Some(family)
+}
+
 #[cfg(target_os = "macos")]
 fn decode_icns(bytes: &[u8]) -> Option<RawIcon> {
-    let family = icns::IconFamily::read(bytes).ok()?;
+    // The parser allocates from element lengths before checking for truncated data.
+    let family = icns::IconFamily::read(checked_icns_family(bytes)?).ok()?;
     let icon_type = family
         .available_icons()
         .into_iter()
@@ -676,6 +695,40 @@ mod input_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn icns_length_checks_reject_truncated_and_oversized_elements() {
+        for length in 0..8 {
+            assert!(checked_icns_family(&b"icns\0\0\0\x08"[..length]).is_none());
+        }
+        assert!(checked_icns_family(b"nope\0\0\0\x08").is_none());
+        for family_length in [0_u32, 1, 7, 9, 15, 17, u32::MAX] {
+            let mut bytes = b"icns".to_vec();
+            bytes.extend_from_slice(&family_length.to_be_bytes());
+            bytes.extend_from_slice(b"quux\0\0\0\x08");
+            assert!(checked_icns_family(&bytes).is_none(), "{family_length}");
+        }
+        for element_length in [0_u32, 1, 7, 9, 128 * 1024 * 1024, u32::MAX] {
+            let mut bytes = b"icns\0\0\0\x10quux".to_vec();
+            bytes.extend_from_slice(&element_length.to_be_bytes());
+            assert!(checked_icns_family(&bytes).is_none(), "{element_length}");
+        }
+        // An element must fit inside the declared family, even with extra input.
+        assert!(checked_icns_family(b"icns\0\0\0\x10quux\0\0\0\x09#").is_none());
+        // Check later elements as well as the first one.
+        assert!(checked_icns_family(b"icns\0\0\0\x18quux\0\0\0\x08icp5\xff\xff\xff\xff").is_none());
+    }
+
+    #[test]
+    fn icns_length_checks_preserve_complete_families_and_trailing_bytes() {
+        let empty = b"icns\0\0\0\x08";
+        assert_eq!(checked_icns_family(empty), Some(empty.as_slice()));
+        let bytes = b"icns\0\0\0\x1fquux\0\0\0\x0efoobarbaz!\0\0\0\x09#";
+        assert_eq!(checked_icns_family(bytes), Some(bytes.as_slice()));
+        let mut padded = bytes.to_vec();
+        padded.extend_from_slice(b"padding after the declared family");
+        assert_eq!(checked_icns_family(&padded), Some(bytes.as_slice()));
     }
 
     #[test]
