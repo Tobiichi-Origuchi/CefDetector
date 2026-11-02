@@ -40,19 +40,29 @@ static ICON_THEME_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
 static NEIGHBOR_ICON_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
+fn read_icon_file(path: &Path, maximum: u64) -> Option<Vec<u8>> {
+    let file = crate::file_io::open_regular_file(path).ok()?;
+    if file.metadata().ok()?.len() > maximum {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    // Bound the read even if the file grows after its metadata was checked.
+    file.take(maximum + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > maximum {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn try_icon_from_path(path: &Path, maximum: u64) -> Option<RawIcon> {
+    let bytes = read_icon_file(path, maximum)?;
     #[cfg(target_os = "macos")]
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("icns"))
     {
-        return decode_icns(path);
+        return decode_icns(&bytes);
     }
-    let mut bytes = Vec::new();
-    crate::file_io::open_regular_file(path)
-        .ok()?
-        .read_to_end(&mut bytes)
-        .ok()?;
     let bytes: Arc<[u8]> = bytes.into();
     let is_svg = path
         .extension()
@@ -67,8 +77,8 @@ fn try_icon_from_path(path: &Path) -> Option<RawIcon> {
 }
 
 #[cfg(target_os = "macos")]
-fn decode_icns(path: &Path) -> Option<RawIcon> {
-    let family = icns::IconFamily::read(crate::file_io::open_regular_file(path).ok()?).ok()?;
+fn decode_icns(bytes: &[u8]) -> Option<RawIcon> {
+    let family = icns::IconFamily::read(bytes).ok()?;
     let icon_type = family
         .available_icons()
         .into_iter()
@@ -556,7 +566,7 @@ pub fn configured_fallback_icon(config: &IconConfig) -> RawIcon {
     config
         .fallback_path
         .as_deref()
-        .and_then(try_icon_from_path)
+        .and_then(|path| try_icon_from_path(path, config.max_file_bytes))
         .unwrap_or_else(|| DEFAULT_ICON.clone())
 }
 
@@ -578,7 +588,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
                 {
                     crate::search::macos::bundle_icon_path(exe_path)
                         .as_deref()
-                        .and_then(try_icon_from_path)
+                        .and_then(|path| try_icon_from_path(path, config.max_file_bytes))
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -598,7 +608,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
             }
             IconSource::Neighbor => find_neighboring_icon(exe_path, config)
                 .as_deref()
-                .and_then(try_icon_from_path),
+                .and_then(|path| try_icon_from_path(path, config.max_file_bytes)),
             IconSource::Desktop => {
                 #[cfg(target_os = "linux")]
                 {
@@ -608,7 +618,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
                         .then(|| find_icon_via_desktop_file(exe_path, config))
                         .flatten()
                         .as_deref()
-                        .and_then(try_icon_from_path)
+                        .and_then(|path| try_icon_from_path(path, config.max_file_bytes))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -624,7 +634,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
                         .then(|| crate::package_manager::find_icon_via_package_manager(exe_path))
                         .flatten()
                         .as_deref()
-                        .and_then(try_icon_from_path)
+                        .and_then(|path| try_icon_from_path(path, config.max_file_bytes))
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -644,6 +654,85 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
         .unwrap()
         .insert(exe_path.to_path_buf(), icon.clone());
     icon
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use std::fs;
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("cefdetector-icon-{name}-{}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn icon_file_reads_respect_the_input_byte_limit() {
+        let root = TempDirectory::new("input-limit");
+        let path = root.0.join("icon.png");
+        let file = fs::File::create(&path).unwrap();
+        for maximum in [1, 16, IconConfig::default().max_file_bytes] {
+            for (length, expected) in [
+                (0, Some(0)),
+                (maximum - 1, Some(maximum - 1)),
+                (maximum, Some(maximum)),
+                (maximum + 1, None),
+                (maximum * 8, None),
+            ] {
+                file.set_len(length).unwrap();
+                assert_eq!(
+                    read_icon_file(&path, maximum).map(|bytes| bytes.len() as u64),
+                    expected,
+                    "input length: {length}, limit: {maximum}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_icon_files_follow_the_existing_fallback_policy() {
+        let root = TempDirectory::new("input-fallback");
+        let icon_path = root.0.join("icon.png");
+        fs::File::create(&icon_path).unwrap().set_len(17).unwrap();
+        let mut config = IconConfig {
+            max_file_bytes: 16,
+            sources: vec![IconSource::Neighbor, IconSource::Builtin],
+            ..Default::default()
+        };
+        let app = root.0.join("with-builtin");
+        fs::write(&app, []).unwrap();
+        let actual = get_app_icon(app.to_string_lossy().into_owned(), &config);
+        let RawIcon::PngOrIco(bytes) = actual else {
+            panic!("oversized neighboring icon did not use the builtin fallback");
+        };
+        assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+
+        config.fallback_path = Some(icon_path);
+        let RawIcon::PngOrIco(bytes) = configured_fallback_icon(&config) else {
+            panic!("oversized configured fallback did not use the embedded icon");
+        };
+        assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+
+        config.sources = vec![IconSource::Neighbor];
+        let app = root.0.join("without-builtin");
+        fs::write(&app, []).unwrap();
+        assert!(matches!(
+            get_app_icon(app.to_string_lossy().into_owned(), &config),
+            RawIcon::Empty
+        ));
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -708,7 +797,7 @@ Icon=wrong-icon\n";
 mod macos_tests {
     use std::fs;
 
-    use super::{RawIcon, decode_icns};
+    use super::{RawIcon, try_icon_from_path};
 
     #[test]
     fn icns_is_decoded_to_png_for_the_existing_gui_pipeline() {
@@ -721,7 +810,8 @@ mod macos_tests {
         let path =
             std::env::temp_dir().join(format!("cefdetector-icon-{}.icns", std::process::id()));
         family.write(fs::File::create(&path).unwrap()).unwrap();
-        let icon = decode_icns(&path).unwrap();
+        let icon =
+            try_icon_from_path(&path, crate::config::IconConfig::default().max_file_bytes).unwrap();
         fs::remove_file(path).unwrap();
         let RawIcon::PngOrIco(bytes) = icon else {
             panic!("decoded ICNS did not use the raster icon path");

@@ -1000,6 +1000,8 @@ impl Default for GraphicsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IconConfig {
     pub enabled: bool,
+    #[serde(deserialize_with = "deserialize_icon_file_bytes")]
+    pub max_file_bytes: u64,
     pub decode_max_size: u32,
     pub fallback_path: Option<PathBuf>,
     pub sources: Vec<IconSource>,
@@ -1007,10 +1009,19 @@ pub struct IconConfig {
     pub linux: LinuxIconConfig,
 }
 
+fn deserialize_icon_file_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = i64::deserialize(deserializer)?;
+    Ok(bytes.clamp(1, 64 * 1024 * 1024) as u64)
+}
+
 impl Default for IconConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            max_file_bytes: 8 * 1024 * 1024,
             decode_max_size: 64,
             fallback_path: None,
             sources: vec![
@@ -2698,6 +2709,70 @@ mod tests {
         assert!(message.contains("gui.window.width"));
         assert!(message.contains("2 | width = 1"));
         assert_eq!(marked_fragment(&message), "1");
+    }
+
+    #[test]
+    fn icon_file_byte_limits_default_and_clamp_in_files_and_overrides() {
+        assert_eq!(AppConfig::default().icons.max_file_bytes, 8 * 1024 * 1024);
+        for (input, expected) in [
+            ("-9223372036854775808", 1),
+            ("-1", 1),
+            ("0", 1),
+            ("1", 1),
+            ("16", 16),
+            ("8388608", 8 * 1024 * 1024),
+            ("67108864", 64 * 1024 * 1024),
+            ("67108865", 64 * 1024 * 1024),
+            ("9223372036854775807", 64 * 1024 * 1024),
+        ] {
+            let file = TempConfig::new(&format!("[icons]\nmax_file_bytes = {input}\n"));
+            for options in [
+                LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: vec![file.0.clone()],
+                    overrides: Vec::new(),
+                },
+                LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: Vec::new(),
+                    overrides: vec![format!("icons.max_file_bytes={input}")],
+                },
+            ] {
+                let loaded = load(&options).unwrap();
+                assert_eq!(loaded.config.icons.max_file_bytes, expected, "{input}");
+                assert!(
+                    format_effective(&loaded)
+                        .unwrap()
+                        .contains(&format!("max_file_bytes = {expected}\n"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_icon_file_byte_limits_report_source_diagnostics() {
+        for value in [
+            "'8MiB'",
+            "'8388608'",
+            "1.0",
+            "true",
+            "[]",
+            "{}",
+            "1979-05-27",
+        ] {
+            let message = file_error(&format!("[icons]\nmax_file_bytes = {value}\n"));
+            assert!(
+                message.contains("invalid explicit configuration"),
+                "{message}"
+            );
+            assert_eq!(marked_fragment(&message), value, "{message}");
+
+            let message = override_error(&format!("icons.max_file_bytes={value}"));
+            assert!(message.contains("unusable --set override"), "{message}");
+            assert_eq!(marked_fragment(&message), value, "{message}");
+        }
     }
 
     #[test]

@@ -279,6 +279,11 @@ linux_display = "auto"
 [icons]
 # Enable icon lookup and decoding.
 enabled = true
+# Maximum independent icon file size, as an integer byte count.
+# Integers are clamped to 1..67108864; other types are configuration errors.
+# Oversized files are skipped, including fallback_path (uses the embedded icon).
+# This limit does not apply to PE/AppImage containers or image decoding.
+max_file_bytes = 8388608
 # Maximum decoded icon side in pixels. Allowed range: 1..4096.
 decode_max_size = 64
 # SVG icons ignore external images; supported data URLs remain embedded.
