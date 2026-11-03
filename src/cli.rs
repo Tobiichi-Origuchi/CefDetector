@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -22,7 +23,7 @@ enum OutputFormat {
 #[derive(Debug, PartialEq, Eq)]
 struct CliOptions {
     output_format: OutputFormat,
-    output_path: Option<String>,
+    output_path: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -93,7 +94,16 @@ fn print_config_help() {
     println!("  validate [FILE]  Validate the effective configuration or one file");
 }
 
-fn parse_arguments(args: &[String]) -> Result<Action, String> {
+fn argument_text(argument: &OsStr) -> Result<&str, String> {
+    argument.to_str().ok_or_else(|| {
+        format!(
+            "argument is not valid UTF-8: {}",
+            argument.to_string_lossy()
+        )
+    })
+}
+
+fn parse_arguments(args: &[OsString]) -> Result<Action, String> {
     if args.first().is_some_and(|arg| arg == "cli") {
         return parse_cli_arguments(&args[1..]);
     }
@@ -105,15 +115,14 @@ fn parse_arguments(args: &[String]) -> Result<Action, String> {
 }
 
 #[cfg(feature = "gui")]
-fn parse_gui_arguments(args: &[String]) -> Result<Action, String> {
-    if let Some(arg) = args
-        .iter()
-        .find(|arg| !(cfg!(target_os = "macos") && arg.starts_with("-psn_")))
-    {
-        match arg.as_str() {
+fn parse_gui_arguments(args: &[OsString]) -> Result<Action, String> {
+    if let Some(arg) = args.iter().find(|arg| {
+        !(cfg!(target_os = "macos") && arg.to_str().is_some_and(|arg| arg.starts_with("-psn_")))
+    }) {
+        match argument_text(arg)? {
             "--help" | "-h" => return Ok(Action::RootHelp),
             "--version" | "-V" => return Ok(Action::Version),
-            _ => return Err(format!("unknown option or command: {arg}")),
+            arg => return Err(format!("unknown option or command: {arg}")),
         }
     }
 
@@ -121,19 +130,19 @@ fn parse_gui_arguments(args: &[String]) -> Result<Action, String> {
 }
 
 #[cfg(not(feature = "gui"))]
-fn parse_gui_arguments(args: &[String]) -> Result<Action, String> {
+fn parse_gui_arguments(args: &[OsString]) -> Result<Action, String> {
     let Some(arg) = args.first() else {
         return Ok(Action::RootHelp);
     };
 
-    match arg.as_str() {
+    match argument_text(arg)? {
         "--help" | "-h" => Ok(Action::RootHelp),
         "--version" | "-V" => Ok(Action::Version),
-        _ => Err(format!("unknown option or command: {arg}")),
+        arg => Err(format!("unknown option or command: {arg}")),
     }
 }
 
-fn parse_cli_arguments(args: &[String]) -> Result<Action, String> {
+fn parse_cli_arguments(args: &[OsString]) -> Result<Action, String> {
     if args.is_empty() {
         return Ok(Action::CliHelp);
     }
@@ -143,7 +152,7 @@ fn parse_cli_arguments(args: &[String]) -> Result<Action, String> {
     let mut index = 0;
 
     while index < args.len() {
-        match args[index].as_str() {
+        match argument_text(&args[index])? {
             "--help" | "-h" => return Ok(Action::CliHelp),
             "--version" | "-V" => return Ok(Action::Version),
             "--toml" | "-T" => output_format = Some(OutputFormat::Toml),
@@ -153,7 +162,7 @@ fn parse_cli_arguments(args: &[String]) -> Result<Action, String> {
                 let Some(path) = args.get(index + 1) else {
                     return Err("--output requires a file path".into());
                 };
-                output_path = Some(path.clone());
+                output_path = Some(PathBuf::from(path));
                 index += 1;
             }
             arg => return Err(format!("unknown CLI option: {arg}")),
@@ -170,58 +179,72 @@ fn parse_cli_arguments(args: &[String]) -> Result<Action, String> {
     }
 }
 
-fn parse_config_arguments(args: &[String]) -> Result<Action, String> {
+fn parse_config_arguments(args: &[OsString]) -> Result<Action, String> {
     let command = match args {
         [] => ConfigCommand::Help,
-        [value] if matches!(value.as_str(), "-h" | "--help") => ConfigCommand::Help,
+        [value] if matches!(value.to_str(), Some("-h" | "--help")) => ConfigCommand::Help,
         [command] if command == "paths" => ConfigCommand::Paths,
         [command] if command == "show" => ConfigCommand::Show,
         [command] if command == "validate" => ConfigCommand::Validate(None),
         [command, path] if command == "validate" => {
             ConfigCommand::Validate(Some(PathBuf::from(path)))
         }
-        [command, ..] => return Err(format!("unknown config command or arguments: {command}")),
+        [command, ..] => {
+            return Err(format!(
+                "unknown config command or arguments: {}",
+                argument_text(command)?
+            ));
+        }
     };
     Ok(Action::Config(command))
 }
 
-fn extract_config_options(args: &[String]) -> Result<(Vec<String>, LoadOptions), String> {
+fn extract_config_options(args: &[OsString]) -> Result<(Vec<OsString>, LoadOptions), String> {
     let mut command_args = Vec::new();
     let mut options = LoadOptions::default();
     let mut index = 0;
     while index < args.len() {
-        match args[index].as_str() {
-            "--config" => {
+        match args[index].to_str() {
+            Some("--config") => {
                 let Some(path) = args.get(index + 1) else {
                     return Err("--config requires a file path".into());
                 };
                 options.explicit_files.push(PathBuf::from(path));
                 index += 1;
             }
-            "--no-system-config" => options.no_system = true,
-            "--no-user-config" => options.no_user = true,
-            "--set" => {
+            Some("--no-system-config") => options.no_system = true,
+            Some("--no-user-config") => options.no_user = true,
+            Some("--set") => {
                 let Some(value) = args.get(index + 1) else {
                     return Err("--set requires KEY=VALUE".into());
                 };
-                options.overrides.push(value.clone());
+                options.overrides.push(argument_text(value)?.to_owned());
                 index += 1;
             }
-            arg if arg.starts_with("--config=") => {
-                let path = arg.trim_start_matches("--config=");
-                if path.is_empty() {
-                    return Err("--config requires a file path".into());
-                }
-                options.explicit_files.push(PathBuf::from(path));
-            }
-            arg if arg.starts_with("--set=") => {
+            Some(arg) if arg.starts_with("--set=") => {
                 let value = arg.trim_start_matches("--set=");
                 if value.is_empty() {
                     return Err("--set requires KEY=VALUE".into());
                 }
                 options.overrides.push(value.to_owned());
             }
-            _ => command_args.push(args[index].clone()),
+            _ => {
+                if let Some(mut path) = args[index].as_encoded_bytes().strip_prefix(b"--config=") {
+                    // Preserve the existing trim_start_matches behavior.
+                    while let Some(rest) = path.strip_prefix(b"--config=") {
+                        path = rest;
+                    }
+                    if path.is_empty() {
+                        return Err("--config requires a file path".into());
+                    }
+                    // SAFETY: these bytes come from this OsStr in the same build.
+                    // They were split only after a nonempty ASCII prefix.
+                    let path = unsafe { OsStr::from_encoded_bytes_unchecked(path) };
+                    options.explicit_files.push(PathBuf::from(path));
+                } else {
+                    command_args.push(args[index].clone());
+                }
+            }
         }
         index += 1;
     }
@@ -406,9 +429,9 @@ fn run_cli(config: &AppConfig, options: CliOptions) -> Result<(), String> {
             .truncate(config.cli.overwrite)
             .create_new(!config.cli.overwrite)
             .open(&path)
-            .map_err(|error| format!("failed to open {path} for output: {error}"))?;
+            .map_err(|error| format!("failed to open {} for output: {error}", path.display()))?;
         file.write_all(output.as_bytes())
-            .map_err(|error| format!("failed to write {path}: {error}"))?;
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     } else {
         println!("{output}");
     }
@@ -480,7 +503,7 @@ fn handle_config_command(command: ConfigCommand, options: &LoadOptions) {
 }
 
 pub fn handle_arguments() -> Option<GuiOptions> {
-    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let (args, load_options) = extract_config_options(&raw_args).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         eprintln!("Run 'cefdetector --help' for usage information.");
@@ -524,6 +547,9 @@ pub fn handle_arguments() -> Option<GuiOptions> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
     use super::{
         Action, CliOptions, ConfigCommand, OutputFormat, extract_config_options, format_json,
         format_results, parse_arguments, push_json_string,
@@ -531,8 +557,100 @@ mod tests {
     use crate::config::CliConfig;
     use crate::models::AppInfo;
 
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(ToString::to_string).collect()
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[cfg(unix)]
+    fn non_unicode_argument() -> OsString {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        OsString::from_vec(b"native-\xff.toml".to_vec())
+    }
+
+    #[cfg(windows)]
+    fn non_unicode_argument() -> OsString {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        OsString::from_wide(&[b'n' as u16, 0xD800, b'.' as u16, b't' as u16])
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn path_arguments_preserve_native_encoding() {
+        let path = non_unicode_argument();
+        assert!(path.to_str().is_none());
+        let expected = PathBuf::from(&path);
+        let mut inline = OsString::from("--config=");
+        inline.push(&path);
+        for input in [vec!["--config".into(), path.clone()], vec![inline]] {
+            let (command, options) = extract_config_options(&input).unwrap();
+            assert!(command.is_empty());
+            assert_eq!(options.explicit_files, std::slice::from_ref(&expected));
+        }
+        assert_eq!(
+            parse_arguments(&["config".into(), "validate".into(), path.clone()]),
+            Ok(Action::Config(ConfigCommand::Validate(Some(
+                expected.clone()
+            ))))
+        );
+        assert_eq!(
+            parse_arguments(&["cli".into(), "--json".into(), "--output".into(), path]),
+            Ok(Action::RunCli(CliOptions {
+                output_format: OutputFormat::Json,
+                output_path: Some(expected),
+            }))
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn non_unicode_options_and_overrides_return_argument_errors() {
+        let invalid = non_unicode_argument();
+        for input in [
+            vec![invalid.clone()],
+            vec!["cli".into(), invalid.clone()],
+            vec!["config".into(), invalid.clone()],
+        ] {
+            assert!(
+                parse_arguments(&input)
+                    .unwrap_err()
+                    .contains("not valid UTF-8")
+            );
+        }
+        assert!(
+            extract_config_options(&["--set".into(), invalid.clone()])
+                .unwrap_err()
+                .contains("not valid UTF-8")
+        );
+        let mut inline = OsString::from("--set=");
+        inline.push(invalid);
+        let (command, _) = extract_config_options(&[inline]).unwrap();
+        assert!(
+            parse_arguments(&command)
+                .unwrap_err()
+                .contains("not valid UTF-8")
+        );
+    }
+
+    #[test]
+    fn inline_config_paths_keep_existing_prefix_handling() {
+        for (input, expected) in [
+            ("--config=extra.toml", "extra.toml"),
+            ("--config=--config=extra.toml", "extra.toml"),
+            ("--config==extra.toml", "=extra.toml"),
+            ("--config=目录/extra.toml", "目录/extra.toml"),
+        ] {
+            let (command, options) = extract_config_options(&args(&[input])).unwrap();
+            assert!(command.is_empty());
+            assert_eq!(options.explicit_files, [PathBuf::from(expected)]);
+        }
+        for input in ["--config=", "--config=--config="] {
+            assert_eq!(
+                extract_config_options(&args(&[input])).unwrap_err(),
+                "--config requires a file path"
+            );
+        }
     }
 
     #[test]
