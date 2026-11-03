@@ -516,7 +516,7 @@ fn find_squashfs_offset(mut reader: impl std::io::Read) -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
+pub fn find_icon_via_appimage(exe_path: &Path, maximum: u64) -> Option<RawIcon> {
     use backhand::{InnerNode, Squashfs};
     use std::io::{Read, Seek, SeekFrom};
 
@@ -568,9 +568,12 @@ pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
     if let Some(n) = resolved_node
         && let InnerNode::File(file_node) = &n.inner
     {
-        let mut reader = fs_reader.file(file_node).reader();
+        if file_node.file_len() as u64 > maximum {
+            return None;
+        }
+        let mut reader = fs_reader.file(file_node).reader().take(maximum + 1);
         let mut bytes = Vec::new();
-        if reader.read_to_end(&mut bytes).is_ok() {
+        if reader.read_to_end(&mut bytes).is_ok() && bytes.len() as u64 <= maximum {
             let ext = target_path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -639,7 +642,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
             IconSource::Appimage => {
                 #[cfg(target_os = "linux")]
                 {
-                    find_icon_via_appimage(exe_path)
+                    find_icon_via_appimage(exe_path, config.max_appimage_icon_bytes)
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -743,7 +746,10 @@ mod input_tests {
                 "missing.AppImage",
             ] {
                 let path = root.join(name);
-                assert!(find_icon_via_appimage(&path).is_none(), "{name}");
+                assert!(
+                    find_icon_via_appimage(&path, config.max_appimage_icon_bytes).is_none(),
+                    "{name}"
+                );
                 let RawIcon::PngOrIco(bytes) =
                     get_app_icon(path.to_string_lossy().into_owned(), &config)
                 else {
@@ -787,30 +793,108 @@ mod input_tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn appimage_icon_lookup_preserves_regular_files_and_symlinks() {
+    fn write_appimage_icon(path: &Path, name: &str, bytes: &[u8]) {
         use backhand::{FilesystemWriter, NodeHeader};
         use std::io::Cursor;
+
+        let mut writer = FilesystemWriter::default();
+        writer
+            .push_file(
+                Cursor::new(bytes),
+                format!("/{name}"),
+                NodeHeader::default(),
+            )
+            .unwrap();
+        writer
+            .push_symlink(name, "/.DirIcon", NodeHeader::default())
+            .unwrap();
+        writer.write(fs::File::create(path).unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_icon_lookup_preserves_regular_files_and_symlinks() {
         use std::os::unix::fs::symlink;
 
         let root = TempDirectory::new("appimage-regular-files");
         let expected = include_bytes!("../icons/default_cef_icon.ico");
-        let mut writer = FilesystemWriter::default();
-        writer
-            .push_file(Cursor::new(expected), "/icon.ico", NodeHeader::default())
-            .unwrap();
-        writer
-            .push_symlink("icon.ico", "/.DirIcon", NodeHeader::default())
-            .unwrap();
         let path = root.0.join("regular.AppImage");
-        writer.write(fs::File::create(&path).unwrap()).unwrap();
+        write_appimage_icon(&path, "icon.ico", expected);
         let link = root.0.join("link.appimage");
         symlink(&path, &link).unwrap();
         for path in [&path, &link] {
-            let Some(RawIcon::PngOrIco(bytes)) = find_icon_via_appimage(path) else {
+            let Some(RawIcon::PngOrIco(bytes)) =
+                find_icon_via_appimage(path, IconConfig::default().max_appimage_icon_bytes)
+            else {
                 panic!("{} did not produce an icon", path.display());
             };
             assert_eq!(&*bytes, expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_icon_reads_respect_the_extracted_byte_limit() {
+        let root = TempDirectory::new("appimage-byte-limit");
+        let path = root.0.join("limited.AppImage");
+        for name in ["icon.ico", "icon.svg"] {
+            for maximum in [1, 16, IconConfig::default().max_appimage_icon_bytes] {
+                for length in [maximum - 1, maximum, maximum + 1] {
+                    let expected = vec![b'x'; length as usize];
+                    write_appimage_icon(&path, name, &expected);
+                    match find_icon_via_appimage(&path, maximum) {
+                        None => assert!(length > maximum, "{name}: {length}/{maximum}"),
+                        Some(icon) => {
+                            assert!(length <= maximum, "{name}: {length}/{maximum}");
+                            let bytes = match icon {
+                                RawIcon::Svg(bytes) if name.ends_with(".svg") => bytes,
+                                RawIcon::PngOrIco(bytes) if name.ends_with(".ico") => bytes,
+                                _ => panic!("unexpected icon kind for {name}"),
+                            };
+                            assert_eq!(&*bytes, expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_limits_are_independent_and_oversized_icons_follow_existing_sources() {
+        let root = TempDirectory::new("appimage-limit-fallback");
+        let icon = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#;
+        let neighbor = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>"#;
+        fs::write(root.0.join("icon.svg"), neighbor).unwrap();
+        let mut config = IconConfig {
+            max_file_bytes: neighbor.len() as u64,
+            max_appimage_icon_bytes: icon.len() as u64 - 1,
+            ..Default::default()
+        };
+        config.neighbor.names = vec!["icon.svg".into()];
+        for (name, sources) in [
+            ("neighbor", vec![IconSource::Appimage, IconSource::Neighbor]),
+            ("builtin", vec![IconSource::Appimage, IconSource::Builtin]),
+            ("empty", vec![IconSource::Appimage]),
+            ("within-limit", vec![IconSource::Appimage]),
+        ] {
+            let path = root.0.join(format!("{name}.AppImage"));
+            write_appimage_icon(&path, "icon.svg", icon);
+            config.sources = sources;
+            if name == "within-limit" {
+                config.max_file_bytes = 1;
+                config.max_appimage_icon_bytes = icon.len() as u64;
+            }
+            let actual = get_app_icon(path.to_string_lossy().into_owned(), &config);
+            match (name, actual) {
+                ("neighbor", RawIcon::Svg(bytes)) => assert_eq!(&*bytes, neighbor),
+                ("builtin", RawIcon::PngOrIco(bytes)) => {
+                    assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+                }
+                ("empty", RawIcon::Empty) => {}
+                ("within-limit", RawIcon::Svg(bytes)) => assert_eq!(&*bytes, icon),
+                _ => panic!("unexpected source result for {name}"),
+            }
         }
     }
 

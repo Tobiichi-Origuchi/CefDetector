@@ -284,6 +284,11 @@ enabled = true
 # Oversized files are skipped, including fallback_path (uses the embedded icon).
 # This limit does not apply to PE/AppImage containers or image decoding.
 max_file_bytes = 8388608
+# Maximum extracted AppImage icon size, as an integer byte count (Linux only).
+# Integers are clamped to 1..67108864; other types are configuration errors.
+# Oversized icons are skipped and lookup continues with the next source.
+# This limit does not bound container parsing, block decompression, or decoding.
+max_appimage_icon_bytes = 8388608
 # Maximum decoded icon side in pixels. Allowed range: 1..4096.
 decode_max_size = 64
 # SVG icons ignore external images; supported data URLs remain embedded.
