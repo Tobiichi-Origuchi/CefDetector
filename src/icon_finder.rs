@@ -402,22 +402,32 @@ fn build_desktop_index() -> HashMap<String, String> {
     index
 }
 
-fn assemble_valid_ico(group: pelite::resources::group::GroupResource<'_>) -> Vec<u8> {
+fn assemble_valid_ico(
+    group: pelite::resources::group::GroupResource<'_>,
+    maximum: u64,
+) -> Option<Vec<u8>> {
+    let entries = group.entries();
+    let mut image_offset = 6 + entries.len() as u32 * 16;
+    if u64::from(image_offset) > maximum {
+        return None;
+    }
     let mut out = Vec::new();
 
     // Write ICO header
     out.extend_from_slice(&0u16.to_le_bytes()); // idReserved
     out.extend_from_slice(&1u16.to_le_bytes()); // idType
 
-    let entries = group.entries();
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // idCount
 
     let mut image_data = Vec::new();
-    let mut image_offset = 6 + entries.len() as u32 * 16;
 
     for entry in entries {
         let bytes = group.image(entry.nId).unwrap_or(&[]);
-        let actual_size = bytes.len() as u32;
+        let actual_size = u32::try_from(bytes.len()).ok()?;
+        let next_offset = image_offset.checked_add(actual_size)?;
+        if u64::from(next_offset) > maximum {
+            return None;
+        }
 
         // Write ICONDIRENTRY
         out.push(entry.bWidth);
@@ -430,7 +440,7 @@ fn assemble_valid_ico(group: pelite::resources::group::GroupResource<'_>) -> Vec
         out.extend_from_slice(&image_offset.to_le_bytes());
 
         image_data.push(bytes);
-        image_offset += actual_size;
+        image_offset = next_offset;
     }
 
     // Append all image data
@@ -438,31 +448,30 @@ fn assemble_valid_ico(group: pelite::resources::group::GroupResource<'_>) -> Vec
         out.extend_from_slice(data);
     }
 
-    out
+    Some(out)
 }
 
-fn extract_pe_icon_bytes(exe_path: &Path) -> Option<Vec<u8>> {
+fn extract_pe_icon_bytes(exe_path: &Path, maximum: u64) -> Option<Vec<u8>> {
     let map = pelite::FileMap::open(exe_path).ok()?;
     let pe = pelite::PeFile::from_bytes(&map).ok()?;
     let resources = pe.resources().ok()?;
 
     for (_name, group) in resources.icons().filter_map(Result::ok) {
-        let bytes = assemble_valid_ico(group);
-        if !bytes.is_empty() {
+        if let Some(bytes) = assemble_valid_ico(group, maximum) {
             return Some(bytes);
         }
     }
     None
 }
 
-pub fn find_icon_via_pe(exe_path: &Path) -> Option<RawIcon> {
+pub fn find_icon_via_pe(exe_path: &Path, maximum: u64) -> Option<RawIcon> {
     let path_str = exe_path.to_string_lossy();
     if !path_str.to_lowercase().ends_with(".exe") {
         return None;
     }
 
     // Try the exact executable
-    if let Some(bytes) = extract_pe_icon_bytes(exe_path) {
+    if let Some(bytes) = extract_pe_icon_bytes(exe_path, maximum) {
         return Some(RawIcon::PngOrIco(bytes.into()));
     }
 
@@ -476,7 +485,7 @@ pub fn find_icon_via_pe(exe_path: &Path) -> Option<RawIcon> {
                     if p.is_file()
                         && p.extension().is_some_and(|e| e == "exe")
                         && p != exe_path
-                        && let Some(bytes) = extract_pe_icon_bytes(&p)
+                        && let Some(bytes) = extract_pe_icon_bytes(&p, maximum)
                     {
                         return Some(RawIcon::PngOrIco(bytes.into()));
                     }
@@ -638,7 +647,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
                     None
                 }
             }
-            IconSource::Pe => find_icon_via_pe(exe_path),
+            IconSource::Pe => find_icon_via_pe(exe_path, config.max_pe_icon_bytes),
             IconSource::Appimage => {
                 #[cfg(target_os = "linux")]
                 {
@@ -718,6 +727,203 @@ mod input_tests {
     impl Drop for TempDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn pe_with_icon_groups(image: &[u8], counts: &[u16]) -> Vec<u8> {
+        fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        fn directory(bytes: &mut [u8], offset: usize, entries: &[(u32, u32)]) {
+            put_u16(bytes, offset + 14, entries.len() as u16);
+            for (index, &(name, target)) in entries.iter().enumerate() {
+                put_u32(bytes, offset + 16 + index * 8, name);
+                put_u32(bytes, offset + 20 + index * 8, target);
+            }
+        }
+
+        // One RT_ICON image is shared by all entries in every RT_GROUP_ICON.
+        let image_offset = 112 + counts.len() * 48;
+        let mut section = vec![0; image_offset];
+        directory(&mut section, 0, &[(3, 0x8000_0020), (14, 0x8000_0060)]);
+        directory(&mut section, 32, &[(1, 0x8000_0038)]);
+        directory(&mut section, 56, &[(1033, 80)]);
+        put_u32(&mut section, 80, 0x1000 + image_offset as u32);
+        put_u32(&mut section, 84, image.len() as u32);
+        let groups: Vec<_> = (0..counts.len())
+            .map(|index| {
+                (
+                    index as u32 + 1,
+                    0x8000_0000 | (112 + counts.len() * 8 + index * 40) as u32,
+                )
+            })
+            .collect();
+        directory(&mut section, 96, &groups);
+        section.extend_from_slice(image);
+        section.resize(section.len().next_multiple_of(4), 0);
+        for (index, &count) in counts.iter().enumerate() {
+            let language_offset = 112 + counts.len() * 8 + index * 40;
+            directory(
+                &mut section,
+                language_offset,
+                &[(1033, (language_offset + 24) as u32)],
+            );
+            let data_offset = section.len() as u32;
+            put_u32(&mut section, language_offset + 24, 0x1000 + data_offset);
+            put_u32(
+                &mut section,
+                language_offset + 28,
+                6 + u32::from(count) * 14,
+            );
+            section.extend_from_slice(&[0, 0, 1, 0]);
+            section.extend_from_slice(&count.to_le_bytes());
+            for _ in 0..count {
+                section.extend_from_slice(&[128, 128, 0, 0, 1, 0, 32, 0]);
+                section.extend_from_slice(&(image.len() as u32).to_le_bytes());
+                section.extend_from_slice(&1_u16.to_le_bytes());
+            }
+        }
+
+        // A PE32+ file with a single resource section. It is parsed, never run.
+        let mut pe = vec![0; 512];
+        pe[..2].copy_from_slice(b"MZ");
+        put_u32(&mut pe, 60, 128);
+        pe[128..132].copy_from_slice(b"PE\0\0");
+        put_u16(&mut pe, 132, 0x8664);
+        put_u16(&mut pe, 134, 1);
+        put_u16(&mut pe, 148, 240);
+        put_u16(&mut pe, 150, 0x22);
+        let optional = 152;
+        put_u16(&mut pe, optional, 0x20B);
+        pe[optional + 24..optional + 32].copy_from_slice(&0x1_4000_0000_u64.to_le_bytes());
+        put_u32(&mut pe, optional + 32, 0x1000);
+        put_u32(&mut pe, optional + 36, 512);
+        put_u32(
+            &mut pe,
+            optional + 56,
+            (0x1000 + section.len()).next_multiple_of(4096) as u32,
+        );
+        put_u32(&mut pe, optional + 60, 512);
+        put_u16(&mut pe, optional + 68, 3);
+        put_u32(&mut pe, optional + 108, 16);
+        put_u32(&mut pe, optional + 128, 0x1000);
+        put_u32(&mut pe, optional + 132, section.len() as u32);
+        let raw_size = section.len().next_multiple_of(512);
+        let header = optional + 240;
+        pe[header..header + 8].copy_from_slice(b".rsrc\0\0\0");
+        put_u32(&mut pe, header + 8, section.len() as u32);
+        put_u32(&mut pe, header + 12, 0x1000);
+        put_u32(&mut pe, header + 16, raw_size as u32);
+        put_u32(&mut pe, header + 20, 512);
+        put_u32(&mut pe, header + 36, 0x4000_0040);
+        pe.extend_from_slice(&section);
+        pe.resize(512 + raw_size, 0);
+        pe
+    }
+
+    #[test]
+    fn pe_icon_byte_limits_include_headers_and_repeated_images() {
+        let mut image = include_bytes!("../icons/128x128.png").to_vec();
+        image.resize(65536, 0);
+        for count in [0, 1, 2, 144] {
+            let bytes = pe_with_icon_groups(&image, &[count]);
+            let pe = pelite::PeFile::from_bytes(&bytes).unwrap();
+            let resources = pe.resources().unwrap();
+            let (_, group) = resources.icons().next().unwrap().unwrap();
+            let expected = 6 + u64::from(count) * (16 + image.len() as u64);
+            for maximum in [1, expected - 1, expected, expected + 1] {
+                match assemble_valid_ico(group, maximum) {
+                    None => assert!(maximum < expected, "{count}: {maximum}/{expected}"),
+                    Some(icon) => {
+                        assert!(maximum >= expected, "{count}: {maximum}/{expected}");
+                        assert_eq!(icon.len() as u64, expected);
+                        assert_eq!(u16::from_le_bytes(icon[4..6].try_into().unwrap()), count);
+                        assert!(
+                            icon[6 + usize::from(count) * 16..]
+                                .chunks_exact(image.len())
+                                .all(|chunk| chunk == image)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pe_lookup_skips_oversized_groups_and_uses_its_own_limit() {
+        let root = TempDirectory::new("pe-group-limit");
+        let path = root.0.join("groups.exe");
+        let mut image = include_bytes!("../icons/128x128.png").to_vec();
+        image.resize(65536, 0);
+        fs::write(&path, pe_with_icon_groups(&image, &[144, 1])).unwrap();
+        let maximum = 6 + 16 + image.len() as u64;
+        assert!(fs::metadata(&path).unwrap().len() > maximum);
+        let config = IconConfig {
+            max_file_bytes: 1,
+            max_appimage_icon_bytes: 1,
+            max_pe_icon_bytes: maximum,
+            sources: vec![IconSource::Pe],
+            ..Default::default()
+        };
+        let RawIcon::PngOrIco(bytes) = get_app_icon(path.to_string_lossy().into_owned(), &config)
+        else {
+            panic!("an oversized first PE group blocked the smaller group");
+        };
+        assert_eq!(bytes.len() as u64, maximum);
+        assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 1);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (128, 128));
+    }
+
+    #[test]
+    fn pe_icon_rejections_continue_the_existing_lookup_chain() {
+        let root = TempDirectory::new("pe-limit-fallback");
+        let mut image = include_bytes!("../icons/128x128.png").to_vec();
+        image.resize(65536, 0);
+        let oversized = pe_with_icon_groups(&image, &[144]);
+        let small = pe_with_icon_groups(&image, &[1]);
+        for name in ["sibling", "parent", "neighbor", "builtin", "empty"] {
+            let directory = root.0.join(name);
+            let bin = directory.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            let path = bin.join("app.exe");
+            fs::write(&path, &oversized).unwrap();
+            let mut config = IconConfig {
+                max_pe_icon_bytes: 6 + 16 + image.len() as u64,
+                sources: vec![IconSource::Pe],
+                ..Default::default()
+            };
+            match name {
+                "sibling" => fs::write(bin.join("other.exe"), &small).unwrap(),
+                "parent" => fs::write(directory.join("other.exe"), &small).unwrap(),
+                "neighbor" => {
+                    fs::write(bin.join("icon.png"), include_bytes!("../icons/128x128.png"))
+                        .unwrap();
+                    config.neighbor.names = vec!["icon.png".into()];
+                    config.sources.push(IconSource::Neighbor);
+                }
+                "builtin" => config.sources.push(IconSource::Builtin),
+                "empty" => {}
+                _ => unreachable!(),
+            }
+            let actual = get_app_icon(path.to_string_lossy().into_owned(), &config);
+            match (name, actual) {
+                ("sibling" | "parent", RawIcon::PngOrIco(bytes)) => {
+                    assert_eq!(bytes.len() as u64, config.max_pe_icon_bytes);
+                    assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 1);
+                }
+                ("neighbor", RawIcon::PngOrIco(bytes)) => {
+                    assert_eq!(&*bytes, include_bytes!("../icons/128x128.png"));
+                }
+                ("builtin", RawIcon::PngOrIco(bytes)) => {
+                    assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+                }
+                ("empty", RawIcon::Empty) => {}
+                _ => panic!("unexpected source result for {name}"),
+            }
         }
     }
 

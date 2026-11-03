@@ -1004,6 +1004,8 @@ pub struct IconConfig {
     pub max_file_bytes: u64,
     #[serde(deserialize_with = "deserialize_icon_file_bytes")]
     pub max_appimage_icon_bytes: u64,
+    #[serde(deserialize_with = "deserialize_icon_file_bytes")]
+    pub max_pe_icon_bytes: u64,
     pub decode_max_size: u32,
     pub fallback_path: Option<PathBuf>,
     pub sources: Vec<IconSource>,
@@ -1025,6 +1027,7 @@ impl Default for IconConfig {
             enabled: true,
             max_file_bytes: 8 * 1024 * 1024,
             max_appimage_icon_bytes: 8 * 1024 * 1024,
+            max_pe_icon_bytes: 8 * 1024 * 1024,
             decode_max_size: 64,
             fallback_path: None,
             sources: vec![
@@ -2721,7 +2724,15 @@ mod tests {
             AppConfig::default().icons.max_appimage_icon_bytes,
             8 * 1024 * 1024
         );
-        for field in ["max_file_bytes", "max_appimage_icon_bytes"] {
+        assert_eq!(
+            AppConfig::default().icons.max_pe_icon_bytes,
+            8 * 1024 * 1024
+        );
+        for field in [
+            "max_file_bytes",
+            "max_appimage_icon_bytes",
+            "max_pe_icon_bytes",
+        ] {
             for (input, expected) in [
                 ("-9223372036854775808", 1),
                 ("-1", 1),
@@ -2750,13 +2761,21 @@ mod tests {
                 ] {
                     let loaded = load(&options).unwrap();
                     let icons = &loaded.config.icons;
-                    let (actual, unchanged) = if field == "max_file_bytes" {
-                        (icons.max_file_bytes, icons.max_appimage_icon_bytes)
-                    } else {
-                        (icons.max_appimage_icon_bytes, icons.max_file_bytes)
-                    };
-                    assert_eq!(actual, expected, "{field}={input}");
-                    assert_eq!(unchanged, 8 * 1024 * 1024, "{field}={input}");
+                    for (name, actual) in [
+                        ("max_file_bytes", icons.max_file_bytes),
+                        ("max_appimage_icon_bytes", icons.max_appimage_icon_bytes),
+                        ("max_pe_icon_bytes", icons.max_pe_icon_bytes),
+                    ] {
+                        assert_eq!(
+                            actual,
+                            if name == field {
+                                expected
+                            } else {
+                                8 * 1024 * 1024
+                            },
+                            "{field}={input}: {name}"
+                        );
+                    }
                     assert!(
                         format_effective(&loaded)
                             .unwrap()
@@ -2769,7 +2788,11 @@ mod tests {
 
     #[test]
     fn invalid_icon_file_byte_limits_report_source_diagnostics() {
-        for field in ["max_file_bytes", "max_appimage_icon_bytes"] {
+        for field in [
+            "max_file_bytes",
+            "max_appimage_icon_bytes",
+            "max_pe_icon_bytes",
+        ] {
             for value in [
                 "'8MiB'",
                 "'8388608'",
