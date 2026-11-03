@@ -525,7 +525,7 @@ pub fn find_icon_via_appimage(exe_path: &Path) -> Option<RawIcon> {
         return None;
     }
 
-    let mut file = fs::File::open(exe_path).ok()?;
+    let mut file = crate::file_io::open_regular_file(exe_path).ok()?;
     let length = file.metadata().ok()?.len();
     let offset = find_squashfs_offset((&mut file).take(length))?;
 
@@ -715,6 +715,102 @@ mod input_tests {
     impl Drop for TempDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_icon_lookup_rejects_special_files_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        const CHILD_ROOT: &str = "CEFDETECTOR_TEST_APPIMAGE_SPECIAL_FILES";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = Path::new(&root);
+            let config = IconConfig {
+                sources: vec![IconSource::Appimage, IconSource::Builtin],
+                ..Default::default()
+            };
+            for name in [
+                "fifo.AppImage",
+                "link.AppImage",
+                "socket.AppImage",
+                "directory.AppImage",
+                "missing.AppImage",
+            ] {
+                let path = root.join(name);
+                assert!(find_icon_via_appimage(&path).is_none(), "{name}");
+                let RawIcon::PngOrIco(bytes) =
+                    get_app_icon(path.to_string_lossy().into_owned(), &config)
+                else {
+                    panic!("{name} did not continue to the builtin source");
+                };
+                assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+            }
+            return;
+        }
+
+        let root = TempDirectory::new("appimage-special-files");
+        let fifo = root.0.join("fifo.AppImage");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: fifo_c is a valid, NUL-terminated path owned by this test.
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        symlink(&fifo, root.0.join("link.AppImage")).unwrap();
+        let _listener = UnixListener::bind(root.0.join("socket.AppImage")).unwrap();
+        fs::create_dir(root.0.join("directory.AppImage")).unwrap();
+        // Keep an accidental blocking open from hanging the test runner itself.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "icon_finder::input_tests::appimage_icon_lookup_rejects_special_files_without_blocking",
+            ])
+            .env(CHILD_ROOT, &root.0)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("AppImage icon lookup blocked on a special file");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_icon_lookup_preserves_regular_files_and_symlinks() {
+        use backhand::{FilesystemWriter, NodeHeader};
+        use std::io::Cursor;
+        use std::os::unix::fs::symlink;
+
+        let root = TempDirectory::new("appimage-regular-files");
+        let expected = include_bytes!("../icons/default_cef_icon.ico");
+        let mut writer = FilesystemWriter::default();
+        writer
+            .push_file(Cursor::new(expected), "/icon.ico", NodeHeader::default())
+            .unwrap();
+        writer
+            .push_symlink("icon.ico", "/.DirIcon", NodeHeader::default())
+            .unwrap();
+        let path = root.0.join("regular.AppImage");
+        writer.write(fs::File::create(&path).unwrap()).unwrap();
+        let link = root.0.join("link.appimage");
+        symlink(&path, &link).unwrap();
+        for path in [&path, &link] {
+            let Some(RawIcon::PngOrIco(bytes)) = find_icon_via_appimage(path) else {
+                panic!("{} did not produce an icon", path.display());
+            };
+            assert_eq!(&*bytes, expected);
         }
     }
 
