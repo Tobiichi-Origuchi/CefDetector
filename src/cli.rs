@@ -438,8 +438,8 @@ fn run_cli(config: &AppConfig, options: CliOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn load_config(options: &LoadOptions) -> AppConfig {
-    config::load(options)
+fn config_or_exit(result: Result<config::LoadedConfig, config::ConfigError>) -> AppConfig {
+    result
         .unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2);
@@ -527,7 +527,7 @@ pub fn handle_arguments() -> Option<GuiOptions> {
         Action::CliHelp => print_cli_help(),
         Action::Version => println!("cefdetector {VERSION}"),
         Action::RunCli(options) => {
-            let config = load_config(&load_options);
+            let config = config_or_exit(config::load_for_cli(&load_options));
             if let Err(error) = run_cli(&config, options) {
                 eprintln!("Error: {error}");
                 std::process::exit(1);
@@ -537,7 +537,7 @@ pub fn handle_arguments() -> Option<GuiOptions> {
         #[cfg(feature = "gui")]
         Action::LaunchGui => {
             return Some(GuiOptions {
-                config: load_config(&load_options),
+                config: config_or_exit(config::load(&load_options)),
             });
         }
     }

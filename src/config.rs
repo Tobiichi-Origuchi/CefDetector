@@ -1150,6 +1150,10 @@ impl Default for DiagnosticsConfig {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_with_gui_resources(true)
+    }
+
+    fn validate_with_gui_resources(&self, check_gui_resources: bool) -> Result<(), ConfigError> {
         if self.version != CONFIG_VERSION {
             return Err(ConfigError::new(format!(
                 "unsupported configuration version {}; expected {CONFIG_VERSION}",
@@ -1158,8 +1162,8 @@ impl AppConfig {
         }
 
         validate_search(&self.search)?;
-        validate_gui(&self.gui)?;
-        validate_icons(&self.icons)?;
+        validate_gui(&self.gui, check_gui_resources)?;
+        validate_icons(&self.icons, check_gui_resources)?;
         validate_cli(&self.cli)
     }
 }
@@ -1341,12 +1345,18 @@ fn validate_sfnt(file: &mut std::fs::File, file_length: u64, offset: u64) -> Res
     Ok(())
 }
 
-fn validate_font_face(name: &str, face: &FontFaceConfig) -> Result<(), ConfigError> {
-    const MAX_FONT_BYTES: u64 = 256 * 1024 * 1024;
+fn font_face_path<'a>(name: &str, face: &'a FontFaceConfig) -> Result<&'a Path, ConfigError> {
     let path = face
         .path
         .as_deref()
         .ok_or_else(|| ConfigError::new(format!("{name}.path is required")))?;
+    require_absolute(name, path)?;
+    Ok(path)
+}
+
+fn validate_font_face(name: &str, face: &FontFaceConfig) -> Result<(), ConfigError> {
+    const MAX_FONT_BYTES: u64 = 256 * 1024 * 1024;
+    let path = font_face_path(name, face)?;
     let mut file = validate_readable_file(name, path)?;
     let file_length = file
         .metadata()
@@ -1589,14 +1599,17 @@ fn validate_search(config: &SearchConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
+fn validate_gui(config: &GuiConfig, check_gui_resources: bool) -> Result<(), ConfigError> {
     finite_range("gui.window.width", config.window.width, 100.0, 16_384.0)?;
     finite_range("gui.window.height", config.window.height, 100.0, 16_384.0)?;
     if config.window.title.is_empty() {
         return Err(ConfigError::new("gui.window.title cannot be empty"));
     }
     if let Some(path) = &config.background.path {
-        validate_image_file("gui.background.path", path, false)?;
+        require_absolute("gui.background.path", path)?;
+        if check_gui_resources {
+            validate_image_file("gui.background.path", path, false)?;
+        }
     }
 
     normalized("gui.status.x", config.status.x)?;
@@ -1765,7 +1778,11 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
     }
 
     match config.fonts.mode {
-        FontMode::System => validate_system_fonts()?,
+        FontMode::System => {
+            if check_gui_resources {
+                validate_system_fonts()?;
+            }
+        }
         FontMode::Custom => {
             let mut validated = HashSet::new();
             for (name, chain) in [
@@ -1782,7 +1799,12 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
                 for (index, face) in chain.iter().enumerate() {
                     let key = (face.path.clone(), face.index);
                     if validated.insert(key) {
-                        validate_font_face(&format!("gui.fonts.{name}[{index}]"), face)?;
+                        let name = format!("gui.fonts.{name}[{index}]");
+                        if check_gui_resources {
+                            validate_font_face(&name, face)?;
+                        } else {
+                            font_face_path(&name, face)?;
+                        }
                     }
                 }
             }
@@ -1797,7 +1819,7 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_icons(config: &IconConfig) -> Result<(), ConfigError> {
+fn validate_icons(config: &IconConfig, check_gui_resources: bool) -> Result<(), ConfigError> {
     if config.decode_max_size == 0 || config.decode_max_size > 4096 {
         return Err(ConfigError::new(
             "icons.decode_max_size must be between 1 and 4096",
@@ -1834,13 +1856,19 @@ fn validate_icons(config: &IconConfig) -> Result<(), ConfigError> {
         && config.sources.contains(&IconSource::Builtin)
         && let Some(path) = &config.fallback_path
     {
-        validate_image_file("icons.fallback_path", path, true)?;
+        require_absolute("icons.fallback_path", path)?;
+        if check_gui_resources {
+            validate_image_file("icons.fallback_path", path, true)?;
+        }
     }
     #[cfg(target_os = "linux")]
     if config.enabled && config.sources.contains(&IconSource::Desktop) && config.linux.desktop_files
     {
         for directory in &config.linux.theme_directories {
-            validate_readable_directory("icons.linux.theme_directories", directory)?;
+            require_absolute("icons.linux.theme_directories", directory)?;
+            if check_gui_resources {
+                validate_readable_directory("icons.linux.theme_directories", directory)?;
+            }
         }
     }
     Ok(())
@@ -2021,6 +2049,17 @@ pub fn config_paths() -> ConfigPaths {
 }
 
 pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
+    load_with_validation(options, AppConfig::validate)
+}
+
+pub fn load_for_cli(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
+    load_with_validation(options, |config| config.validate_with_gui_resources(false))
+}
+
+fn load_with_validation(
+    options: &LoadOptions,
+    validate: fn(&AppConfig) -> Result<(), ConfigError>,
+) -> Result<LoadedConfig, ConfigError> {
     let mut effective = toml::Value::try_from(AppConfig::default())
         .map_err(|error| ConfigError::new(format!("failed to encode defaults: {error}")))?;
     let mut sources = Vec::new();
@@ -2028,7 +2067,13 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
 
     if !options.no_system
         && let Some(path) = paths.system
-        && load_file(&path, ConfigSourceKind::System, false, &mut effective)?
+        && load_file(
+            &path,
+            ConfigSourceKind::System,
+            false,
+            &mut effective,
+            validate,
+        )?
     {
         sources.push(ConfigSource {
             kind: ConfigSourceKind::System,
@@ -2037,7 +2082,13 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     }
     if !options.no_user
         && let Some(path) = paths.user
-        && load_file(&path, ConfigSourceKind::User, false, &mut effective)?
+        && load_file(
+            &path,
+            ConfigSourceKind::User,
+            false,
+            &mut effective,
+            validate,
+        )?
     {
         sources.push(ConfigSource {
             kind: ConfigSourceKind::User,
@@ -2045,7 +2096,13 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
         });
     }
     for path in &options.explicit_files {
-        load_file(path, ConfigSourceKind::Explicit, true, &mut effective)?;
+        load_file(
+            path,
+            ConfigSourceKind::Explicit,
+            true,
+            &mut effective,
+            validate,
+        )?;
         sources.push(ConfigSource {
             kind: ConfigSourceKind::Explicit,
             path: path.clone(),
@@ -2054,7 +2111,7 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     for value in &options.overrides {
         let overlay = parse_override(value)?;
         merge_value(&mut effective, overlay);
-        validate_effective(&effective).map_err(|error| {
+        validate_effective(&effective, validate).map_err(|error| {
             let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
             let assignment = parse_assignment(value, 0, "")
                 .expect("a parsed --set override always contains an assignment");
@@ -2076,7 +2133,7 @@ pub fn load(options: &LoadOptions) -> Result<LoadedConfig, ConfigError> {
     let config: AppConfig = effective
         .try_into()
         .map_err(|error| ConfigError::new(format!("invalid effective configuration: {error}")))?;
-    config.validate()?;
+    validate(&config)?;
     Ok(LoadedConfig { config, sources })
 }
 
@@ -2103,6 +2160,7 @@ fn load_file(
     kind: ConfigSourceKind,
     required: bool,
     effective: &mut toml::Value,
+    validate: fn(&AppConfig) -> Result<(), ConfigError>,
 ) -> Result<bool, ConfigError> {
     match std::fs::metadata(path) {
         Ok(metadata) if !metadata.is_file() => {
@@ -2200,17 +2258,20 @@ fn load_file(
     let overlay: toml::Value = toml::from_str(&content)
         .map_err(|error| render_toml_diagnostic(kind, path, &content, &error))?;
     merge_value(effective, overlay);
-    validate_effective(effective)
+    validate_effective(effective, validate)
         .map_err(|error| render_validation_diagnostic(kind, path, &content, &error))?;
     Ok(true)
 }
 
-fn validate_effective(value: &toml::Value) -> Result<(), ConfigError> {
+fn validate_effective(
+    value: &toml::Value,
+    validate: fn(&AppConfig) -> Result<(), ConfigError>,
+) -> Result<(), ConfigError> {
     let config = value
         .clone()
         .try_into::<AppConfig>()
         .map_err(|error| ConfigError::new(error.to_string()))?;
-    config.validate()
+    validate(&config)
 }
 
 fn merge_value(base: &mut toml::Value, overlay: toml::Value) {
@@ -2362,7 +2423,7 @@ mod tests {
 
     use super::{
         AppConfig, ConfigError, FontFaceConfig, FontMode, LoadOptions, MAX_CONFIG_BYTES, RgbaColor,
-        SearchBackend, config_paths, extract_validation_key, format_effective, load,
+        SearchBackend, config_paths, extract_validation_key, format_effective, load, load_for_cli,
         locate_validation_assignment, merge_value, parse_override,
     };
 
@@ -2439,6 +2500,167 @@ mod tests {
             return source.chars().skip(start).take(width).collect();
         }
         panic!("diagnostic has no marked source: {message}");
+    }
+
+    #[test]
+    fn cli_load_skips_unused_image_and_font_files() {
+        let invalid_resource = TempConfig::new("not an image or font");
+        let missing = invalid_resource.0.with_extension("missing");
+        let invalid_path = toml::Value::String(invalid_resource.0.to_string_lossy().into_owned());
+        let missing_path = toml::Value::String(missing.to_string_lossy().into_owned());
+        let custom_fonts = |path: &toml::Value| {
+            let mut text = "[gui.fonts]\nmode = 'custom'\n".to_owned();
+            for role in ["title", "card_regular", "card_bold", "footer"] {
+                text.push_str(&format!("{role} = [{{ path = {path}, index = 0 }}]\n"));
+            }
+            text
+        };
+        for (content, field) in [
+            (
+                format!("[gui.background]\npath = {missing_path}\n"),
+                "gui.background.path",
+            ),
+            (
+                format!("[gui.background]\npath = {invalid_path}\n"),
+                "gui.background.path",
+            ),
+            (custom_fonts(&missing_path), "gui.fonts.title[0]"),
+            (custom_fonts(&invalid_path), "gui.fonts.title[0]"),
+            (
+                format!("[icons]\nfallback_path = {missing_path}\n"),
+                "icons.fallback_path",
+            ),
+            (
+                format!("[icons]\nfallback_path = {invalid_path}\n"),
+                "icons.fallback_path",
+            ),
+        ] {
+            let file = TempConfig::new(&content);
+            let options = LoadOptions {
+                no_system: true,
+                no_user: true,
+                explicit_files: vec![file.0.clone()],
+                overrides: vec!["cli.pretty=false".into()],
+            };
+            let loaded = load_for_cli(&options).unwrap();
+            assert!(!loaded.config.cli.pretty);
+            assert_eq!(loaded.sources.len(), 1);
+            let message = load(&options).unwrap_err().to_string();
+            assert!(message.contains(field), "{message}");
+            assert!(message.contains(&file.0.display().to_string()), "{message}");
+        }
+    }
+
+    #[test]
+    fn cli_load_retains_configuration_and_path_checks() {
+        for (input, marker, reason) in [
+            ("gui.window.width=\"wide\"", "\"wide\"", "invalid type"),
+            ("gui.unknown=1", "gui.unknown", "unknown field"),
+            ("gui.window.width=99.0", "99.0", "between 100"),
+            (
+                "gui.fonts.mode=\"embedded\"",
+                "\"embedded\"",
+                "unknown variant",
+            ),
+            (
+                "gui.background.path=\"relative.webp\"",
+                "\"relative.webp\"",
+                "must be absolute",
+            ),
+            (
+                "icons.fallback_path=\"relative.png\"",
+                "\"relative.png\"",
+                "must be absolute",
+            ),
+            ("icons.decode_max_size=0", "0", "between 1 and 4096"),
+            (
+                "gui.fonts.mode=\"custom\"",
+                "\"custom\"",
+                "must contain at least one font face",
+            ),
+        ] {
+            let message = load_for_cli(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                explicit_files: Vec::new(),
+                overrides: vec![input.into()],
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(message.contains(reason), "{message}");
+            assert_eq!(marked_fragment(&message), marker, "{message}");
+        }
+    }
+
+    #[test]
+    fn cli_load_still_checks_search_directories() {
+        let file = TempConfig::new("");
+        let missing = file.0.with_extension("missing");
+        let path = toml::Value::String(missing.to_string_lossy().into_owned());
+        let message = load_for_cli(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: Vec::new(),
+            overrides: vec![format!("search.roots=[{path}]")],
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("search.roots cannot inspect"), "{message}");
+        assert_eq!(marked_fragment(&message), format!("[{path}]"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_load_skips_unused_icon_theme_directories() {
+        let file = TempConfig::new("");
+        let missing = file.0.with_extension("missing");
+        let path = toml::Value::String(missing.to_string_lossy().into_owned());
+        let options = LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: Vec::new(),
+            overrides: vec![format!("icons.linux.theme_directories=[{path}]")],
+        };
+        assert!(load_for_cli(&options).is_ok());
+        let message = load(&options).unwrap_err().to_string();
+        assert!(
+            message.contains("icons.linux.theme_directories cannot inspect"),
+            "{message}"
+        );
+        assert_eq!(marked_fragment(&message), format!("[{path}]"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_load_does_not_require_system_font_commands() {
+        const CHILD: &str = "CEFDETECTOR_TEST_CLI_WITHOUT_FONTS";
+        if std::env::var_os(CHILD).is_some() {
+            let options = LoadOptions {
+                no_system: true,
+                no_user: true,
+                ..Default::default()
+            };
+            assert!(load_for_cli(&options).is_ok());
+            let message = load(&options).unwrap_err().to_string();
+            assert!(message.contains("cannot run fc-match"), "{message}");
+            return;
+        }
+        // A regular file cannot supply executable commands through PATH.
+        let file = TempConfig::new("");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::cli_load_does_not_require_system_font_commands",
+            ])
+            .env(CHILD, "1")
+            .env("PATH", &file.0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
