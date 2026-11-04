@@ -228,9 +228,9 @@ decimal_places = 2
 units = ["B", "KB", "MB", "GB", "TB"]
 
 [gui.fonts]
-# Font source: "embedded", "system", or "custom". Custom mode requires every
+# Font source: "system" or "custom". Custom mode requires every
 # chain below to contain at least one readable TTF, OTF, TTC, or OTC face.
-mode = "embedded"
+mode = "system"
 # Ordered title fallback chain for custom mode. Each item accepts an absolute
 # path and a zero-based collection index; single-font TTF/OTF files require 0.
 # Example: [{ path = "/fonts/primary.ttc", index = 0 }, { path = "/fonts/fallback.ttf", index = 0 }]

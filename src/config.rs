@@ -496,11 +496,7 @@ string_enum!(ScrollbarMode {
     Hidden,
 });
 string_enum!(ClickAction { Reveal, Open, None });
-string_enum!(FontMode {
-    Embedded,
-    System,
-    Custom,
-});
+string_enum!(FontMode { System, Custom });
 string_enum!(GraphicsApi { Auto, Opengl, Gles });
 string_enum!(LinuxDisplay { Auto, Egl, Glx });
 string_enum!(CardField {
@@ -916,7 +912,7 @@ pub struct FontConfig {
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            mode: FontMode::Embedded,
+            mode: FontMode::System,
             title: Vec::new(),
             card_regular: Vec::new(),
             card_bold: Vec::new(),
@@ -1769,7 +1765,6 @@ fn validate_gui(config: &GuiConfig) -> Result<(), ConfigError> {
     }
 
     match config.fonts.mode {
-        FontMode::Embedded => {}
         FontMode::System => validate_system_fonts()?,
         FontMode::Custom => {
             let mut validated = HashSet::new();
@@ -2304,6 +2299,63 @@ fn insert_override(table: &mut toml::Table, parts: &[&str], value: toml::Value) 
 }
 
 #[cfg(test)]
+pub(crate) fn system_font_for_tests() -> FontFaceConfig {
+    // Tests use installed fonts so no font software needs to be bundled as a fixture.
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("fc-match")
+            .args(["-f", "%{file}\n%{index}\n", "sans-serif"])
+            .output()
+            .expect("font tests require fc-match and an installed sans-serif font");
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout).unwrap();
+        let mut lines = output.lines();
+        FontFaceConfig {
+            path: Some(PathBuf::from(lines.next().unwrap())),
+            index: lines.next().unwrap().parse().unwrap(),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let fonts = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("Fonts");
+        let path = [
+            "segoeui.ttf",
+            "msyh.ttc",
+            "msjh.ttc",
+            "malgun.ttf",
+            "meiryo.ttc",
+        ]
+        .into_iter()
+        .map(|name| fonts.join(name))
+        .find(|path| path.is_file())
+        .expect("font tests require an installed Windows sans-serif font");
+        FontFaceConfig {
+            path: Some(path),
+            index: 0,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = [
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("font tests require an installed macOS sans-serif font");
+        FontFaceConfig {
+            path: Some(path),
+            index: 0,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2608,7 +2660,7 @@ mod tests {
             (
                 "gui.fonts.mode=\"invalid\"",
                 "\"invalid\"",
-                &["embedded", "system", "custom"],
+                &["system", "custom"],
             ),
             (
                 "gui.graphics.api=\"invalid\"",
@@ -3187,12 +3239,7 @@ mod tests {
 
     #[test]
     fn custom_font_chains_require_readable_valid_fonts() {
-        let font_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts/card-regular-subset.ttf");
-        let face = FontFaceConfig {
-            path: Some(font_path),
-            index: 0,
-        };
+        let face = super::system_font_for_tests();
         let mut config = AppConfig::default();
         config.gui.fonts.mode = FontMode::Custom;
         config.gui.fonts.title = vec![face.clone(), face.clone()];
@@ -3201,9 +3248,10 @@ mod tests {
         config.gui.fonts.footer = vec![face];
         assert!(config.validate().is_ok());
 
-        config.gui.fonts.title[1].index = 1;
+        config.gui.fonts.title[1].index = u32::MAX;
         let error = config.validate().unwrap_err().to_string();
-        assert!(error.contains("gui.fonts.title[1].index must be 0"));
+        assert!(error.contains("gui.fonts.title[1].index"));
+        assert!(error.contains("must be 0") || error.contains("does not exist"));
     }
 
     #[test]

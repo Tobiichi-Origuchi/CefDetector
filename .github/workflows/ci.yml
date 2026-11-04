@@ -78,10 +78,6 @@ jobs:
             CEFDETECTOR_GUI_SMOKE_TEST=1 \
             LIBGL_ALWAYS_SOFTWARE=1 \
             target/release/cefdetector
-          xvfb-run --auto-servernum env \
-            CEFDETECTOR_GUI_SMOKE_TEST=1 \
-            LIBGL_ALWAYS_SOFTWARE=1 \
-            target/release/cefdetector --set 'gui.fonts.mode="system"'
 
   windows:
     name: Windows
@@ -137,10 +133,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "GUI startup test exited with code $LASTEXITCODE"
           }
-          & target/release/cefdetector.exe --set 'gui.fonts.mode="system"'
-          if ($LASTEXITCODE -ne 0) {
-            throw "System-font GUI startup test exited with code $LASTEXITCODE"
-          }
 
       - name: Stage executable
         shell: pwsh
@@ -149,8 +141,6 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -LiteralPath target/release/cefdetector.exe `
             -Destination "dist/cefdetector-windows-x86_64.exe"
-          Copy-Item -LiteralPath @("fonts/OFL-Inter.txt", "fonts/NOTICE.txt") `
-            -Destination dist
 
       - name: Upload build artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -219,4 +209,3 @@ jobs:
           CEFDETECTOR_GUI_SMOKE_TEST: "1"
         run: |
           target/release/cefdetector
-          target/release/cefdetector --set 'gui.fonts.mode="system"'

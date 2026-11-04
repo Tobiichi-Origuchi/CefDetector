@@ -36,11 +36,6 @@ mod macos_text;
 #[cfg(target_os = "linux")]
 const APP_ID: &str = "cefdetector";
 
-#[cfg(test)]
-const SEARCHING_TEXT: &str = "正在全盘搜索 CEF 应用，请耐心等待...";
-#[cfg(test)]
-const REPOSITORY_TEXT: &str = "Repo: github.com/Tobiichi-Origuchi/CefDetector (求个STAR!)";
-
 #[derive(Debug)]
 struct GuiError(String);
 
@@ -1153,7 +1148,6 @@ fn configure_text_renderer(
     config: &crate::config::FontConfig,
 ) -> Result<TextRenderer, GuiError> {
     match config.mode {
-        FontMode::Embedded => Ok(TextRenderer::Egui(configure_embedded_fonts(ctx))),
         FontMode::Custom => configure_custom_fonts(ctx, config).map(TextRenderer::Egui),
         FontMode::System => {
             #[cfg(target_os = "macos")]
@@ -1231,65 +1225,6 @@ fn configure_custom_fonts(
         card_bold: families.remove(0),
         footer: families.remove(0),
     })
-}
-
-fn configure_embedded_fonts(ctx: &egui::Context) -> EguiFonts {
-    const TITLE_NAME: &str = "cefdetector-embedded-title";
-    const CARD_REGULAR_NAME: &str = "cefdetector-embedded-card-regular";
-    const CARD_BOLD_NAME: &str = "cefdetector-embedded-card-bold";
-
-    let title = FontFamily::Name("cefdetector-title".into());
-    let card_regular = FontFamily::Name("cefdetector-card-regular".into());
-    let card_bold = FontFamily::Name("cefdetector-card-bold".into());
-    let footer = FontFamily::Name("cefdetector-footer".into());
-    let mut definitions = FontDefinitions::empty();
-    definitions.font_data.insert(
-        TITLE_NAME.into(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../fonts/title-subset.ttf"
-        ))),
-    );
-    definitions.font_data.insert(
-        CARD_REGULAR_NAME.into(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../fonts/card-regular-subset.ttf"
-        ))),
-    );
-    definitions.font_data.insert(
-        CARD_BOLD_NAME.into(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../fonts/card-bold-subset.ttf"
-        ))),
-    );
-
-    definitions.families.insert(
-        FontFamily::Proportional,
-        vec![CARD_REGULAR_NAME.into(), TITLE_NAME.into()],
-    );
-    definitions
-        .families
-        .insert(FontFamily::Monospace, vec![CARD_REGULAR_NAME.into()]);
-    definitions
-        .families
-        .insert(title.clone(), vec![TITLE_NAME.into()]);
-    definitions
-        .families
-        .insert(card_regular.clone(), vec![CARD_REGULAR_NAME.into()]);
-    definitions
-        .families
-        .insert(card_bold.clone(), vec![CARD_BOLD_NAME.into()]);
-    definitions.families.insert(
-        footer.clone(),
-        vec![CARD_REGULAR_NAME.into(), TITLE_NAME.into()],
-    );
-    ctx.set_fonts(definitions);
-
-    EguiFonts {
-        title,
-        card_regular,
-        card_bold,
-        footer,
-    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1992,9 +1927,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ControlFlow, REPOSITORY_TEXT, SEARCHING_TEXT, TextRole, configure_embedded_fonts,
-        consume_repaint_deadline, decode_svg, format_size, schedule_repaint,
-        scroll_from_thumb_drag, title_font_size,
+        ControlFlow, TextRole, configure_custom_fonts, consume_repaint_deadline, decode_svg,
+        format_size, schedule_repaint, scroll_from_thumb_drag, title_font_size,
     };
 
     #[test]
@@ -2179,40 +2113,17 @@ mod tests {
     }
 
     #[test]
-    fn embedded_font_subsets_stay_small() {
-        assert!(include_bytes!("../fonts/title-subset.ttf").len() <= 100 * 1024);
-        assert!(include_bytes!("../fonts/card-regular-subset.ttf").len() <= 20 * 1024);
-        assert!(include_bytes!("../fonts/card-bold-subset.ttf").len() <= 20 * 1024);
-    }
-
-    #[test]
-    fn embedded_fonts_cover_fixed_ui_text_but_not_cjk_card_names() {
-        let ctx = egui::Context::default();
-        let configured = configure_embedded_fonts(&ctx);
-        let _ = ctx.run_ui(Default::default(), |_| {});
-        let title = egui::FontId::new(18.0, configured.family(TextRole::Title));
-        let card = egui::FontId::new(11.0, configured.family(TextRole::CardRegular));
-        let footer = egui::FontId::new(12.0, configured.family(TextRole::Footer));
-
-        ctx.fonts_mut(|fonts| {
-            assert!(fonts.has_glyphs(&title, SEARCHING_TEXT));
-            assert!(fonts.has_glyphs(
-                &title,
-                "搜索完成！这台电脑上总共有 0123456789 个 Chromium 内核的应用 (1.23 GB)"
-            ));
-            assert!(fonts.has_glyphs(&footer, REPOSITORY_TEXT));
-            assert!(fonts.has_glyphs(
-                &card,
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.… "
-            ));
-            assert!(!fonts.has_glyph(&card, '中'));
-        });
-    }
-
-    #[test]
     fn truncated_card_names_keep_their_layout_width() {
         let ctx = egui::Context::default();
-        let configured = configure_embedded_fonts(&ctx);
+        let chain = vec![crate::config::system_font_for_tests()];
+        let config = crate::config::FontConfig {
+            mode: crate::config::FontMode::Custom,
+            title: chain.clone(),
+            card_regular: chain.clone(),
+            card_bold: chain.clone(),
+            footer: chain,
+        };
+        let configured = configure_custom_fonts(&ctx, &config).unwrap();
         let mut size = egui::Vec2::ZERO;
         let mut elided = false;
         let mut final_character = None;

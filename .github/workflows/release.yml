@@ -225,8 +225,6 @@ jobs:
             "config.toml.example"
             "README.md"
             "LICENSE"
-            "fonts/OFL-Inter.txt"
-            "fonts/NOTICE.txt"
           )
           Copy-Item -LiteralPath $packageFiles -Destination $stagingDirectory
           New-Item -ItemType Directory -Force dist | Out-Null
