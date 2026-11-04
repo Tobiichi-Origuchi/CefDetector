@@ -451,27 +451,27 @@ fn assemble_valid_ico(
     Some(out)
 }
 
-fn extract_pe_icon_bytes(exe_path: &Path, maximum: u64) -> Option<Vec<u8>> {
-    let map = pelite::FileMap::open(exe_path).ok()?;
-    let pe = pelite::PeFile::from_bytes(&map).ok()?;
+fn extract_pe_icon_bytes(exe_path: &Path, config: &IconConfig) -> Option<Vec<u8>> {
+    let bytes = read_icon_file(exe_path, config.max_pe_file_bytes)?;
+    let pe = pelite::PeFile::from_bytes(&bytes).ok()?;
     let resources = pe.resources().ok()?;
 
     for (_name, group) in resources.icons().filter_map(Result::ok) {
-        if let Some(bytes) = assemble_valid_ico(group, maximum) {
+        if let Some(bytes) = assemble_valid_ico(group, config.max_pe_icon_bytes) {
             return Some(bytes);
         }
     }
     None
 }
 
-pub fn find_icon_via_pe(exe_path: &Path, maximum: u64) -> Option<RawIcon> {
+pub fn find_icon_via_pe(exe_path: &Path, config: &IconConfig) -> Option<RawIcon> {
     let path_str = exe_path.to_string_lossy();
     if !path_str.to_lowercase().ends_with(".exe") {
         return None;
     }
 
     // Try the exact executable
-    if let Some(bytes) = extract_pe_icon_bytes(exe_path, maximum) {
+    if let Some(bytes) = extract_pe_icon_bytes(exe_path, config) {
         return Some(RawIcon::PngOrIco(bytes.into()));
     }
 
@@ -485,7 +485,7 @@ pub fn find_icon_via_pe(exe_path: &Path, maximum: u64) -> Option<RawIcon> {
                     if p.is_file()
                         && p.extension().is_some_and(|e| e == "exe")
                         && p != exe_path
-                        && let Some(bytes) = extract_pe_icon_bytes(&p, maximum)
+                        && let Some(bytes) = extract_pe_icon_bytes(&p, config)
                     {
                         return Some(RawIcon::PngOrIco(bytes.into()));
                     }
@@ -647,7 +647,7 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
                     None
                 }
             }
-            IconSource::Pe => find_icon_via_pe(exe_path, config.max_pe_icon_bytes),
+            IconSource::Pe => find_icon_via_pe(exe_path, config),
             IconSource::Appimage => {
                 #[cfg(target_os = "linux")]
                 {
@@ -879,50 +879,92 @@ mod input_tests {
     }
 
     #[test]
+    fn pe_container_reads_respect_the_independent_file_limit() {
+        let root = TempDirectory::new("pe-file-limit");
+        let path = root.0.join("app.exe");
+        let image = include_bytes!("../icons/128x128.png");
+        let mut file_bytes = pe_with_icon_groups(image, &[1]);
+        file_bytes.resize(32768, 0); // A valid image with an unused file overlay.
+        fs::write(&path, &file_bytes).unwrap();
+        let file_size = file_bytes.len() as u64;
+        let icon_size = 6 + 16 + image.len() as u64;
+        for maximum in [
+            1,
+            file_size - 1,
+            file_size,
+            file_size + 1,
+            4 * 1024 * 1024 * 1024,
+        ] {
+            let config = IconConfig {
+                max_file_bytes: 1,
+                max_appimage_icon_bytes: 1,
+                max_pe_icon_bytes: icon_size,
+                max_pe_file_bytes: maximum,
+                ..Default::default()
+            };
+            match extract_pe_icon_bytes(&path, &config) {
+                None => assert!(maximum < file_size, "{maximum}/{file_size}"),
+                Some(bytes) => {
+                    assert!(maximum >= file_size, "{maximum}/{file_size}");
+                    assert_eq!(bytes.len() as u64, icon_size);
+                    let decoded = image::load_from_memory(&bytes).unwrap();
+                    assert_eq!((decoded.width(), decoded.height()), (128, 128));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pe_icon_rejections_continue_the_existing_lookup_chain() {
         let root = TempDirectory::new("pe-limit-fallback");
         let mut image = include_bytes!("../icons/128x128.png").to_vec();
         image.resize(65536, 0);
         let oversized = pe_with_icon_groups(&image, &[144]);
         let small = pe_with_icon_groups(&image, &[1]);
-        for name in ["sibling", "parent", "neighbor", "builtin", "empty"] {
-            let directory = root.0.join(name);
-            let bin = directory.join("bin");
-            fs::create_dir_all(&bin).unwrap();
-            let path = bin.join("app.exe");
-            fs::write(&path, &oversized).unwrap();
-            let mut config = IconConfig {
-                max_pe_icon_bytes: 6 + 16 + image.len() as u64,
-                sources: vec![IconSource::Pe],
-                ..Default::default()
-            };
-            match name {
-                "sibling" => fs::write(bin.join("other.exe"), &small).unwrap(),
-                "parent" => fs::write(directory.join("other.exe"), &small).unwrap(),
-                "neighbor" => {
-                    fs::write(bin.join("icon.png"), include_bytes!("../icons/128x128.png"))
-                        .unwrap();
-                    config.neighbor.names = vec!["icon.png".into()];
-                    config.sources.push(IconSource::Neighbor);
+        for rejection in ["icon", "file"] {
+            for name in ["sibling", "parent", "neighbor", "builtin", "empty"] {
+                let directory = root.0.join(rejection).join(name);
+                let bin = directory.join("bin");
+                fs::create_dir_all(&bin).unwrap();
+                let path = bin.join("app.exe");
+                fs::write(&path, &oversized).unwrap();
+                let mut config = IconConfig {
+                    max_pe_icon_bytes: 6 + 16 + image.len() as u64,
+                    sources: vec![IconSource::Pe],
+                    ..Default::default()
+                };
+                if rejection == "file" {
+                    config.max_pe_file_bytes = small.len() as u64;
+                    config.max_pe_icon_bytes = 6 + 144 * (16 + image.len() as u64);
                 }
-                "builtin" => config.sources.push(IconSource::Builtin),
-                "empty" => {}
-                _ => unreachable!(),
-            }
-            let actual = get_app_icon(path.to_string_lossy().into_owned(), &config);
-            match (name, actual) {
-                ("sibling" | "parent", RawIcon::PngOrIco(bytes)) => {
-                    assert_eq!(bytes.len() as u64, config.max_pe_icon_bytes);
-                    assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 1);
+                match name {
+                    "sibling" => fs::write(bin.join("other.exe"), &small).unwrap(),
+                    "parent" => fs::write(directory.join("other.exe"), &small).unwrap(),
+                    "neighbor" => {
+                        fs::write(bin.join("icon.png"), include_bytes!("../icons/128x128.png"))
+                            .unwrap();
+                        config.neighbor.names = vec!["icon.png".into()];
+                        config.sources.push(IconSource::Neighbor);
+                    }
+                    "builtin" => config.sources.push(IconSource::Builtin),
+                    "empty" => {}
+                    _ => unreachable!(),
                 }
-                ("neighbor", RawIcon::PngOrIco(bytes)) => {
-                    assert_eq!(&*bytes, include_bytes!("../icons/128x128.png"));
+                let actual = get_app_icon(path.to_string_lossy().into_owned(), &config);
+                match (name, actual) {
+                    ("sibling" | "parent", RawIcon::PngOrIco(bytes)) => {
+                        assert_eq!(bytes.len() as u64, 6 + 16 + image.len() as u64);
+                        assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 1);
+                    }
+                    ("neighbor", RawIcon::PngOrIco(bytes)) => {
+                        assert_eq!(&*bytes, include_bytes!("../icons/128x128.png"));
+                    }
+                    ("builtin", RawIcon::PngOrIco(bytes)) => {
+                        assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+                    }
+                    ("empty", RawIcon::Empty) => {}
+                    _ => panic!("unexpected source result for {name}"),
                 }
-                ("builtin", RawIcon::PngOrIco(bytes)) => {
-                    assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
-                }
-                ("empty", RawIcon::Empty) => {}
-                _ => panic!("unexpected source result for {name}"),
             }
         }
     }

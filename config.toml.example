@@ -294,6 +294,12 @@ max_appimage_icon_bytes = 8388608
 # Oversized groups are skipped; lookup continues through other groups and sources.
 # This limit does not bound EXE container size, PE parsing, or image decoding.
 max_pe_icon_bytes = 8388608
+# Maximum PE container file size to read, as an integer byte count.
+# Integers are clamped to 1..4294967296; other types are configuration errors.
+# Files are read into owned memory; larger limits permit higher memory and I/O use.
+# Oversized files are skipped, continuing the existing PE and icon lookup chain.
+# This is independent of max_pe_icon_bytes and does not bound image decoding.
+max_pe_file_bytes = 268435456
 # Maximum decoded icon side in pixels. Allowed range: 1..4096.
 decode_max_size = 64
 # SVG icons ignore external images; supported data URLs remain embedded.

@@ -1006,6 +1006,8 @@ pub struct IconConfig {
     pub max_appimage_icon_bytes: u64,
     #[serde(deserialize_with = "deserialize_icon_file_bytes")]
     pub max_pe_icon_bytes: u64,
+    #[serde(deserialize_with = "deserialize_pe_file_bytes")]
+    pub max_pe_file_bytes: u64,
     pub decode_max_size: u32,
     pub fallback_path: Option<PathBuf>,
     pub sources: Vec<IconSource>,
@@ -1021,6 +1023,14 @@ where
     Ok(bytes.clamp(1, 64 * 1024 * 1024) as u64)
 }
 
+fn deserialize_pe_file_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = i64::deserialize(deserializer)?;
+    Ok(bytes.clamp(1, 4 * 1024 * 1024 * 1024) as u64)
+}
+
 impl Default for IconConfig {
     fn default() -> Self {
         Self {
@@ -1028,6 +1038,7 @@ impl Default for IconConfig {
             max_file_bytes: 8 * 1024 * 1024,
             max_appimage_icon_bytes: 8 * 1024 * 1024,
             max_pe_icon_bytes: 8 * 1024 * 1024,
+            max_pe_file_bytes: 256 * 1024 * 1024,
             decode_max_size: 64,
             fallback_path: None,
             sources: vec![
@@ -2728,22 +2739,35 @@ mod tests {
             AppConfig::default().icons.max_pe_icon_bytes,
             8 * 1024 * 1024
         );
+        assert_eq!(
+            AppConfig::default().icons.max_pe_file_bytes,
+            256 * 1024 * 1024
+        );
         for field in [
             "max_file_bytes",
             "max_appimage_icon_bytes",
             "max_pe_icon_bytes",
+            "max_pe_file_bytes",
         ] {
-            for (input, expected) in [
-                ("-9223372036854775808", 1),
-                ("-1", 1),
-                ("0", 1),
-                ("1", 1),
-                ("16", 16),
-                ("8388608", 8 * 1024 * 1024),
-                ("67108864", 64 * 1024 * 1024),
-                ("67108865", 64 * 1024 * 1024),
-                ("9223372036854775807", 64 * 1024 * 1024),
+            for (input, expected_icon, expected_pe_file) in [
+                ("-9223372036854775808", 1, 1),
+                ("-1", 1, 1),
+                ("0", 1, 1),
+                ("1", 1, 1),
+                ("16", 16, 16),
+                ("8388608", 8388608, 8388608),
+                ("67108864", 67108864, 67108864),
+                ("67108865", 67108864, 67108865),
+                ("268435456", 67108864, 268435456),
+                ("4294967296", 67108864, 4294967296),
+                ("4294967297", 67108864, 4294967296),
+                ("9223372036854775807", 67108864, 4294967296),
             ] {
+                let expected = if field == "max_pe_file_bytes" {
+                    expected_pe_file
+                } else {
+                    expected_icon
+                };
                 let file = TempConfig::new(&format!("[icons]\n{field} = {input}\n"));
                 for options in [
                     LoadOptions {
@@ -2761,18 +2785,27 @@ mod tests {
                 ] {
                     let loaded = load(&options).unwrap();
                     let icons = &loaded.config.icons;
-                    for (name, actual) in [
-                        ("max_file_bytes", icons.max_file_bytes),
-                        ("max_appimage_icon_bytes", icons.max_appimage_icon_bytes),
-                        ("max_pe_icon_bytes", icons.max_pe_icon_bytes),
+                    for (name, actual, default) in [
+                        ("max_file_bytes", icons.max_file_bytes, 8 * 1024 * 1024),
+                        (
+                            "max_appimage_icon_bytes",
+                            icons.max_appimage_icon_bytes,
+                            8 * 1024 * 1024,
+                        ),
+                        (
+                            "max_pe_icon_bytes",
+                            icons.max_pe_icon_bytes,
+                            8 * 1024 * 1024,
+                        ),
+                        (
+                            "max_pe_file_bytes",
+                            icons.max_pe_file_bytes,
+                            256 * 1024 * 1024,
+                        ),
                     ] {
                         assert_eq!(
                             actual,
-                            if name == field {
-                                expected
-                            } else {
-                                8 * 1024 * 1024
-                            },
+                            if name == field { expected } else { default },
                             "{field}={input}: {name}"
                         );
                     }
@@ -2792,6 +2825,7 @@ mod tests {
             "max_file_bytes",
             "max_appimage_icon_bytes",
             "max_pe_icon_bytes",
+            "max_pe_file_bytes",
         ] {
             for value in [
                 "'8MiB'",
