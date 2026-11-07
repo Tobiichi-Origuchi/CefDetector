@@ -1,13 +1,16 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read as _};
+use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::config::SearchConfig;
+use crate::search::command::read_pipe;
 
 use super::{CandidateFilter, CandidateSource, ScanCandidate, classify_candidate_name};
 
@@ -51,6 +54,16 @@ fn query_error(query: &str, output: &Output) -> io::Error {
 }
 
 fn run_query(config: &SearchConfig, query: &str) -> io::Result<Output> {
+    let deadline = Instant::now() + Duration::from_millis(config.plocate.timeout_ms);
+    let timeout_error = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "plocate query did not finish within {} ms",
+                config.plocate.timeout_ms
+            ),
+        )
+    };
     let mut child = Command::new(&config.plocate.command)
         .args(["--null", "--literal", "--basename", query])
         .stdout(Stdio::piped())
@@ -78,27 +91,21 @@ fn run_query(config: &SearchConfig, query: &str) -> io::Result<Output> {
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("failed to capture plocate stderr"))?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let stdout_cancelled = Arc::clone(&cancelled);
     let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .take(MAX_STDOUT_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
+        read_pipe(stdout, MAX_STDOUT_BYTES, deadline, &stdout_cancelled)
     });
+    let stderr_cancelled = Arc::clone(&cancelled);
     let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr
-            .take(MAX_STDERR_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
+        read_pipe(stderr, MAX_STDERR_BYTES, deadline, &stderr_cancelled)
     });
-    let timeout = Duration::from_millis(config.plocate.timeout_ms);
-    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(error) => {
+                cancelled.store(true, Ordering::Relaxed);
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
@@ -107,26 +114,31 @@ fn run_query(config: &SearchConfig, query: &str) -> io::Result<Output> {
             }
         }
         if Instant::now() >= deadline {
+            cancelled.store(true, Ordering::Relaxed);
             let _ = child.kill();
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "plocate query did not finish within {} ms",
-                    config.plocate.timeout_ms
-                ),
-            ));
+            return Err(timeout_error());
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| io::Error::other("plocate stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| io::Error::other("plocate stderr reader panicked"))??;
+    // Join both readers even if either one failed; their reads share the deadline.
+    let stdout = stdout_reader.join();
+    let stderr = stderr_reader.join();
+    let map_timeout = |error: io::Error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            timeout_error()
+        } else {
+            error
+        }
+    };
+    let stdout = stdout
+        .map_err(|_| io::Error::other("plocate stdout reader panicked"))?
+        .map_err(map_timeout)?;
+    let stderr = stderr
+        .map_err(|_| io::Error::other("plocate stderr reader panicked"))?
+        .map_err(map_timeout)?;
     if stdout.len() > MAX_STDOUT_BYTES {
         return Err(io::Error::other(
             "plocate output exceeded the 128 MiB safety limit",

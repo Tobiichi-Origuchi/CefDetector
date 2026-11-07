@@ -138,7 +138,20 @@ fn checked_output(output: Output) -> io::Result<Vec<PathBuf>> {
 
 #[cfg(feature = "index")]
 fn query(config: &SpotlightConfig, expression: &str) -> io::Result<Vec<PathBuf>> {
-    use std::io::Read as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_millis(config.timeout_ms);
+    let timeout_error = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "Spotlight query did not finish within {} ms",
+                config.timeout_ms
+            ),
+        )
+    };
 
     let mut child = Command::new(&config.command)
         .args(["-0", expression])
@@ -162,23 +175,21 @@ fn query(config: &SpotlightConfig, expression: &str) -> io::Result<Vec<PathBuf>>
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("failed to capture mdfind stderr"))?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let stdout_cancelled = Arc::clone(&cancelled);
     let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .take(MAX_MDFIND_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
+        super::command::read_pipe(stdout, MAX_MDFIND_BYTES, deadline, &stdout_cancelled)
     });
+    let stderr_cancelled = Arc::clone(&cancelled);
     let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.take(513).read_to_end(&mut bytes).map(|_| bytes)
+        super::command::read_pipe(stderr, 512, deadline, &stderr_cancelled)
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(config.timeout_ms);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
             Err(error) => {
+                cancelled.store(true, Ordering::Relaxed);
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
@@ -186,27 +197,31 @@ fn query(config: &SpotlightConfig, expression: &str) -> io::Result<Vec<PathBuf>>
                 return Err(error);
             }
         }
-        if std::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
+            cancelled.store(true, Ordering::Relaxed);
             let _ = child.kill();
             let _ = child.wait();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "Spotlight query did not finish within {} ms",
-                    config.timeout_ms
-                ),
-            ));
+            return Err(timeout_error());
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| io::Error::other("mdfind stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| io::Error::other("mdfind stderr reader panicked"))??;
+    let stdout = stdout_reader.join();
+    let stderr = stderr_reader.join();
+    let map_timeout = |error: io::Error| {
+        if error.kind() == io::ErrorKind::TimedOut {
+            timeout_error()
+        } else {
+            error
+        }
+    };
+    let stdout = stdout
+        .map_err(|_| io::Error::other("mdfind stdout reader panicked"))?
+        .map_err(map_timeout)?;
+    let stderr = stderr
+        .map_err(|_| io::Error::other("mdfind stderr reader panicked"))?
+        .map_err(map_timeout)?;
     checked_output(Output {
         status,
         stdout,

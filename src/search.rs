@@ -14,6 +14,8 @@ use crate::config::AppConfig;
 use crate::models::AppInfo;
 
 mod backend;
+#[cfg(all(feature = "index", any(target_os = "linux", target_os = "macos")))]
+mod command;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 
