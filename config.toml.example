@@ -246,6 +246,15 @@ card_bold = []
 # Ordered footer-text fallback chain for custom mode. Same item format.
 footer = []
 
+[gui.fonts.system_query]
+# Linux fc-match timeout per invocation, including stdout/stderr collection.
+# Integer milliseconds; allowed range: 100..600000. Unused on Windows/macOS.
+timeout_ms = 30000
+# Maximum stdout and stderr size, each, as an integer byte count (Linux only).
+# Integers are clamped to 1..67108864; other types are configuration errors.
+# A timeout or oversized stream is a failed font query. This does not limit font files.
+max_output_bytes = 65536
+
 [gui.footer]
 # Show the footer link.
 visible = true

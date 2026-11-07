@@ -178,11 +178,11 @@ fn query(config: &SpotlightConfig, expression: &str) -> io::Result<Vec<PathBuf>>
     let cancelled = Arc::new(AtomicBool::new(false));
     let stdout_cancelled = Arc::clone(&cancelled);
     let stdout_reader = std::thread::spawn(move || {
-        super::command::read_pipe(stdout, MAX_MDFIND_BYTES, deadline, &stdout_cancelled)
+        crate::command::read_pipe(stdout, MAX_MDFIND_BYTES, deadline, &stdout_cancelled)
     });
     let stderr_cancelled = Arc::clone(&cancelled);
     let stderr_reader = std::thread::spawn(move || {
-        super::command::read_pipe(stderr, 512, deadline, &stderr_cancelled)
+        crate::command::read_pipe(stderr, 512, deadline, &stderr_cancelled)
     });
     let status = loop {
         match child.try_wait() {

@@ -1,4 +1,6 @@
 mod cli;
+#[cfg(any(target_os = "linux", all(feature = "index", target_os = "macos")))]
+mod command;
 mod config;
 mod file_io;
 #[cfg(feature = "gui")]

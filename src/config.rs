@@ -994,6 +994,7 @@ impl Default for SizeFormatConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FontConfig {
     pub mode: FontMode,
+    pub system_query: SystemFontQueryConfig,
     pub title: Vec<FontFaceConfig>,
     pub card_regular: Vec<FontFaceConfig>,
     pub card_bold: Vec<FontFaceConfig>,
@@ -1004,10 +1005,28 @@ impl Default for FontConfig {
     fn default() -> Self {
         Self {
             mode: FontMode::System,
+            system_query: SystemFontQueryConfig::default(),
             title: Vec::new(),
             card_regular: Vec::new(),
             card_bold: Vec::new(),
             footer: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SystemFontQueryConfig {
+    pub timeout_ms: u64,
+    #[serde(deserialize_with = "deserialize_byte_limit")]
+    pub max_output_bytes: u64,
+}
+
+impl Default for SystemFontQueryConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 30_000,
+            max_output_bytes: 64 * 1024,
         }
     }
 }
@@ -1087,11 +1106,11 @@ impl Default for GraphicsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IconConfig {
     pub enabled: bool,
-    #[serde(deserialize_with = "deserialize_icon_file_bytes")]
+    #[serde(deserialize_with = "deserialize_byte_limit")]
     pub max_file_bytes: u64,
-    #[serde(deserialize_with = "deserialize_icon_file_bytes")]
+    #[serde(deserialize_with = "deserialize_byte_limit")]
     pub max_appimage_icon_bytes: u64,
-    #[serde(deserialize_with = "deserialize_icon_file_bytes")]
+    #[serde(deserialize_with = "deserialize_byte_limit")]
     pub max_pe_icon_bytes: u64,
     #[serde(deserialize_with = "deserialize_pe_file_bytes")]
     pub max_pe_file_bytes: u64,
@@ -1102,7 +1121,7 @@ pub struct IconConfig {
     pub linux: LinuxIconConfig,
 }
 
-fn deserialize_icon_file_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+fn deserialize_byte_limit<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1553,18 +1572,22 @@ fn validate_command(name: &str, command: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn validate_system_fonts() -> Result<(), ConfigError> {
+fn validate_system_fonts(query: &SystemFontQueryConfig) -> Result<(), ConfigError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = query;
     #[cfg(target_os = "linux")]
     {
         for (role, pattern) in [("regular", "sans-serif"), ("bold", "sans-serif:style=bold")] {
-            let output = std::process::Command::new("fc-match")
-                .args(["-f", "%{file}\n%{index}\n", pattern])
-                .output()
-                .map_err(|error| {
-                    ConfigError::new(format!(
-                        "gui.fonts.mode=\"system\" cannot run fc-match: {error}"
-                    ))
-                })?;
+            let output = crate::command::output(
+                std::process::Command::new("fc-match").args(["-f", "%{file}\n%{index}\n", pattern]),
+                query.timeout_ms,
+                query.max_output_bytes,
+            )
+            .map_err(|error| {
+                ConfigError::new(format!(
+                    "gui.fonts.mode=\"system\" cannot run fc-match: {error}"
+                ))
+            })?;
             let output_text = String::from_utf8_lossy(&output.stdout);
             let mut lines = output_text.lines();
             let path = PathBuf::from(lines.next().unwrap_or_default());
@@ -1691,6 +1714,10 @@ fn validate_search(config: &SearchConfig) -> Result<(), ConfigError> {
 }
 
 fn validate_gui(config: &GuiConfig, check_gui_resources: bool) -> Result<(), ConfigError> {
+    validate_timeout(
+        "gui.fonts.system_query.timeout_ms",
+        config.fonts.system_query.timeout_ms,
+    )?;
     finite_range("gui.window.width", config.window.width, 100.0, 16_384.0)?;
     finite_range("gui.window.height", config.window.height, 100.0, 16_384.0)?;
     if config.window.title.is_empty() {
@@ -1871,7 +1898,7 @@ fn validate_gui(config: &GuiConfig, check_gui_resources: bool) -> Result<(), Con
     match config.fonts.mode {
         FontMode::System => {
             if check_gui_resources {
-                validate_system_fonts()?;
+                validate_system_fonts(&config.fonts.system_query)?;
             }
         }
         FontMode::Custom => {
@@ -2666,6 +2693,86 @@ mod tests {
             .to_string();
             assert!(message.contains(reason), "{message}");
             assert_eq!(marked_fragment(&message), marker, "{message}");
+        }
+    }
+
+    #[test]
+    fn system_font_query_limits_default_and_clamp_in_files_and_overrides() {
+        let default = AppConfig::default().gui.fonts.system_query;
+        assert_eq!(default.timeout_ms, 30_000);
+        assert_eq!(default.max_output_bytes, 65_536);
+        for (input, expected) in [
+            (i64::MIN, 1),
+            (0, 1),
+            (1, 1),
+            (65_536, 65_536),
+            (67_108_864, 67_108_864),
+            (67_108_865, 67_108_864),
+            (i64::MAX, 67_108_864),
+        ] {
+            let file = TempConfig::new(&format!(
+                "[gui.fonts.system_query]\nmax_output_bytes={input}\n"
+            ));
+            for options in [
+                LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: vec![file.0.clone()],
+                    ..Default::default()
+                },
+                LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    overrides: vec![format!("gui.fonts.system_query.max_output_bytes={input}")],
+                    ..Default::default()
+                },
+            ] {
+                let loaded = load_for_cli(&options).unwrap();
+                assert_eq!(
+                    loaded.config.gui.fonts.system_query.max_output_bytes,
+                    expected
+                );
+                assert_eq!(loaded.config.gui.fonts.system_query.timeout_ms, 30_000);
+            }
+        }
+        for timeout in [100, 30_000, 600_000] {
+            let loaded = load_for_cli(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                overrides: vec![format!("gui.fonts.system_query.timeout_ms={timeout}")],
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(loaded.config.gui.fonts.system_query.timeout_ms, timeout);
+            assert_eq!(
+                loaded.config.gui.fonts.system_query.max_output_bytes,
+                65_536
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_system_font_query_limits_report_the_source() {
+        for field in ["timeout_ms", "max_output_bytes"] {
+            for value in ["'64KiB'", "1.5", "true", "[]", "{}"] {
+                let message = file_error(&format!("[gui.fonts.system_query]\n{field}={value}\n"));
+                assert!(
+                    message.contains("invalid explicit configuration"),
+                    "{message}"
+                );
+                assert_eq!(marked_fragment(&message), value, "{message}");
+                let message = override_error(&format!("gui.fonts.system_query.{field}={value}"));
+                assert!(message.contains("unusable --set override"), "{message}");
+                assert_eq!(marked_fragment(&message), value, "{message}");
+            }
+        }
+        for value in ["0", "99", "600001"] {
+            let message = file_error(&format!("[gui.fonts.system_query]\ntimeout_ms={value}\n"));
+            assert!(message.contains("between 100 and 600000"), "{message}");
+            assert_eq!(marked_fragment(&message), value, "{message}");
+            let message = override_error(&format!("gui.fonts.system_query.timeout_ms={value}"));
+            assert!(message.contains("between 100 and 600000"), "{message}");
+            assert_eq!(marked_fragment(&message), value, "{message}");
         }
     }
 

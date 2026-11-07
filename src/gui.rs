@@ -23,6 +23,8 @@ use winit::raw_window_handle::HasWindowHandle as _;
 
 #[cfg(target_os = "linux")]
 use crate::config::LinuxDisplay;
+#[cfg(not(target_os = "macos"))]
+use crate::config::SystemFontQueryConfig;
 use crate::config::{
     AppConfig, BackgroundFit, CardField, ClickAction, FontMode, GraphicsApi, HorizontalAlign,
     RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
@@ -1069,11 +1071,13 @@ struct SystemFont {
 }
 
 #[cfg(target_os = "linux")]
-fn match_system_font(pattern: &str) -> Option<SystemFont> {
-    let output = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}\n%{index}\n", pattern])
-        .output()
-        .ok()?;
+fn match_system_font(pattern: &str, query: &SystemFontQueryConfig) -> Option<SystemFont> {
+    let output = crate::command::output(
+        std::process::Command::new("fc-match").args(["-f", "%{file}\n%{index}\n", pattern]),
+        query.timeout_ms,
+        query.max_output_bytes,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1086,10 +1090,10 @@ fn match_system_font(pattern: &str) -> Option<SystemFont> {
 }
 
 #[cfg(target_os = "linux")]
-fn regular_system_fonts() -> Vec<SystemFont> {
+fn regular_system_fonts(query: &SystemFontQueryConfig) -> Vec<SystemFont> {
     [
-        match_system_font("sans-serif"),
-        match_system_font("sans-serif:lang=zh-cn"),
+        match_system_font("sans-serif", query),
+        match_system_font("sans-serif:lang=zh-cn", query),
     ]
     .into_iter()
     .flatten()
@@ -1097,10 +1101,10 @@ fn regular_system_fonts() -> Vec<SystemFont> {
 }
 
 #[cfg(target_os = "linux")]
-fn bold_system_fonts() -> Vec<SystemFont> {
+fn bold_system_fonts(query: &SystemFontQueryConfig) -> Vec<SystemFont> {
     [
-        match_system_font("sans-serif:style=bold"),
-        match_system_font("sans-serif:lang=zh-cn:style=bold"),
+        match_system_font("sans-serif:style=bold", query),
+        match_system_font("sans-serif:lang=zh-cn:style=bold", query),
     ]
     .into_iter()
     .flatten()
@@ -1122,7 +1126,7 @@ fn fonts_from_windows_directory(file_names: &[&str]) -> Vec<SystemFont> {
 }
 
 #[cfg(target_os = "windows")]
-fn regular_system_fonts() -> Vec<SystemFont> {
+fn regular_system_fonts(_query: &SystemFontQueryConfig) -> Vec<SystemFont> {
     fonts_from_windows_directory(&[
         "segoeui.ttf",
         "msyh.ttc",
@@ -1133,7 +1137,7 @@ fn regular_system_fonts() -> Vec<SystemFont> {
 }
 
 #[cfg(target_os = "windows")]
-fn bold_system_fonts() -> Vec<SystemFont> {
+fn bold_system_fonts(_query: &SystemFontQueryConfig) -> Vec<SystemFont> {
     fonts_from_windows_directory(&[
         "segoeuib.ttf",
         "msyhbd.ttc",
@@ -1156,7 +1160,7 @@ fn configure_text_renderer(
             )));
 
             #[cfg(not(target_os = "macos"))]
-            return configure_system_fonts(ctx).map(TextRenderer::Egui);
+            return configure_system_fonts(ctx, &config.system_query).map(TextRenderer::Egui);
         }
     }
 }
@@ -1228,7 +1232,10 @@ fn configure_custom_fonts(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_system_fonts(ctx: &egui::Context) -> Result<EguiFonts, GuiError> {
+fn configure_system_fonts(
+    ctx: &egui::Context,
+    query: &SystemFontQueryConfig,
+) -> Result<EguiFonts, GuiError> {
     let regular_family = FontFamily::Name("cefdetector-regular".into());
     let bold_family = FontFamily::Name("cefdetector-bold".into());
     let mut definitions = FontDefinitions::empty();
@@ -1238,13 +1245,13 @@ fn configure_system_fonts(ctx: &egui::Context) -> Result<EguiFonts, GuiError> {
         &mut definitions,
         &mut mapped_files,
         "cefdetector-system-regular",
-        regular_system_fonts().into_iter(),
+        regular_system_fonts(query).into_iter(),
     );
     let mut bold_names = add_system_fonts(
         &mut definitions,
         &mut mapped_files,
         "cefdetector-system-bold",
-        bold_system_fonts().into_iter(),
+        bold_system_fonts(query).into_iter(),
     );
 
     if regular_names.is_empty() {
@@ -2118,6 +2125,7 @@ mod tests {
         let chain = vec![crate::config::system_font_for_tests()];
         let config = crate::config::FontConfig {
             mode: crate::config::FontMode::Custom,
+            system_query: Default::default(),
             title: chain.clone(),
             card_regular: chain.clone(),
             card_bold: chain.clone(),

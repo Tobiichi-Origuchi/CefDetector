@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::command::read_pipe;
 use crate::config::SearchConfig;
-use crate::search::command::read_pipe;
 
 use super::{CandidateFilter, CandidateSource, ScanCandidate, classify_candidate_name};
 
