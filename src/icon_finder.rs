@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
+use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::io::Read as _;
@@ -190,7 +191,7 @@ pub fn find_neighboring_icon(exe_path: &Path, config: &IconConfig) -> Option<Pat
         return cached.clone();
     }
 
-    let exe_name = exe_path.file_name()?.to_string_lossy().to_string();
+    let exe_name = exe_path.file_name()?;
 
     let result = (|| {
         let dirs_to_check = config
@@ -204,7 +205,13 @@ pub fn find_neighboring_icon(exe_path: &Path, config: &IconConfig) -> Option<Pat
                 continue;
             }
             for template in &config.neighbor.names {
-                let name = template.replace("{executable}", &exe_name);
+                let mut name = OsString::new();
+                for (index, part) in template.split("{executable}").enumerate() {
+                    if index > 0 {
+                        name.push(exe_name);
+                    }
+                    name.push(part);
+                }
                 let p = dir.join(name);
                 if p.exists() {
                     return Some(p);
@@ -730,6 +737,68 @@ mod input_tests {
     impl Drop for TempDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn neighboring_templates_preserve_native_executable_names() {
+        #[cfg(target_os = "linux")]
+        let names = {
+            use std::os::unix::ffi::OsStringExt as _;
+            [
+                OsString::from_vec(b"app-\xff".to_vec()),
+                OsString::from_vec(b"app-\xfe".to_vec()),
+            ]
+        };
+        #[cfg(windows)]
+        let names = {
+            use std::os::windows::ffi::OsStringExt as _;
+            [
+                OsString::from_wide(&[b'a' as u16, 0xD800]),
+                OsString::from_wide(&[b'a' as u16, 0xDC00]),
+            ]
+        };
+
+        let root = TempDirectory::new("native-neighbor-template");
+        let config = IconConfig {
+            sources: vec![IconSource::Neighbor],
+            neighbor: crate::config::NeighborIconConfig {
+                directories: vec!["missing".into(), ".".into(), "art".into()],
+                names: vec![
+                    "missing-{executable}.png".into(),
+                    "prefix-{executable}-{executable}.png".into(),
+                    "fallback.png".into(),
+                ],
+            },
+            ..Default::default()
+        };
+        let image = include_bytes!("../icons/32x32.png");
+        for (index, name) in names.into_iter().enumerate() {
+            assert!(name.to_str().is_none());
+            let directory = root.0.join(index.to_string());
+            fs::create_dir(&directory).unwrap();
+            fs::create_dir(directory.join("art")).unwrap();
+            let executable = directory.join(&name);
+            fs::write(&executable, []).unwrap();
+            let mut icon_name = OsString::from("prefix-");
+            icon_name.push(&name);
+            icon_name.push("-");
+            icon_name.push(&name);
+            icon_name.push(".png");
+            let icon = directory.join(&icon_name);
+            fs::write(&icon, image).unwrap();
+            let decoy = directory.join(icon_name.to_string_lossy().as_ref());
+            assert_ne!(icon, decoy);
+            fs::write(&decoy, include_bytes!("../icons/128x128.png")).unwrap();
+            fs::write(directory.join("fallback.png"), []).unwrap();
+            fs::write(directory.join("art").join(icon_name), []).unwrap();
+
+            assert_eq!(find_neighboring_icon(&executable, &config), Some(icon));
+            let RawIcon::PngOrIco(bytes) = get_app_icon(&executable, &config) else {
+                panic!("native executable name lost its neighboring icon");
+            };
+            assert_eq!(&*bytes, image);
         }
     }
 
