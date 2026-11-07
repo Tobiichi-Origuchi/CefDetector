@@ -5,6 +5,10 @@
 # Colors accept "#RRGGBB" or "#RRGGBBAA". Paths used for search roots, images,
 # icons, and custom fonts must be absolute. Arrays replace lower-precedence
 # arrays instead of being appended.
+# Each file and --set value is checked for syntax, types, unknown keys, and
+# allowed enum values. Range, cross-field, and resource checks apply only to
+# the final merged configuration, so higher-precedence values can repair
+# semantic errors or replace unavailable resources from earlier inputs.
 
 version = 1
 

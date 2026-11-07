@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -385,6 +385,97 @@ fn render_validation_diagnostic(
         span,
         reason,
     )
+}
+
+fn render_override_diagnostic(input: &str, error: &ConfigError) -> ConfigError {
+    let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
+    let (_, assignment) = parse_assignment(input, 0, "")
+        .expect("a parsed --set override always contains an assignment");
+    let span = if reason.contains("unknown field") {
+        assignment.key
+    } else {
+        assignment.value
+    };
+    render_source_diagnostic(
+        "unusable --set override",
+        Path::new("<command line>"),
+        input,
+        Some(span),
+        reason,
+    )
+}
+
+enum ConfigInput {
+    File {
+        kind: ConfigSourceKind,
+        path: PathBuf,
+        content: String,
+    },
+    Override(String),
+}
+
+#[derive(Default)]
+struct ConfigOrigins {
+    inputs: Vec<ConfigInput>,
+    fields: HashMap<String, usize>,
+}
+
+impl ConfigOrigins {
+    fn record(&mut self, input: ConfigInput, overlay: &toml::Value) {
+        let index = self.inputs.len();
+        self.inputs.push(input);
+        self.record_fields(overlay, "", index);
+    }
+
+    fn record_fields(&mut self, value: &toml::Value, path: &str, index: usize) {
+        if let toml::Value::Table(table) = value {
+            for (key, value) in table {
+                let key = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                self.record_fields(value, &key, index);
+            }
+        } else {
+            // Arrays replace the whole previous value, including all font faces.
+            self.fields.insert(path.to_owned(), index);
+        }
+    }
+
+    fn source(&self, key: &str) -> Option<&ConfigInput> {
+        let mut path = String::new();
+        for component in key.split('.') {
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(strip_index(component));
+            if let Some(index) = self.fields.get(&path) {
+                return self.inputs.get(*index);
+            }
+        }
+        None
+    }
+
+    fn render(&self, error: ConfigError) -> ConfigError {
+        let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
+        let mut source = extract_validation_key(reason).and_then(|key| self.source(key));
+        if source.is_none() && reason.contains("font face in custom mode") {
+            source = self.source("gui.fonts.mode");
+        }
+        if source.is_none() && reason.contains("min_font_size cannot exceed max_font_size") {
+            source = self.source("gui.status.max_font_size");
+        }
+        match source {
+            Some(ConfigInput::File {
+                kind,
+                path,
+                content,
+            }) => render_validation_diagnostic(*kind, path, content, &error),
+            Some(ConfigInput::Override(input)) => render_override_diagnostic(input, &error),
+            None => error,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2063,6 +2154,7 @@ fn load_with_validation(
     let mut effective = toml::Value::try_from(AppConfig::default())
         .map_err(|error| ConfigError::new(format!("failed to encode defaults: {error}")))?;
     let mut sources = Vec::new();
+    let mut origins = ConfigOrigins::default();
     let paths = config_paths();
 
     if !options.no_system
@@ -2072,7 +2164,7 @@ fn load_with_validation(
             ConfigSourceKind::System,
             false,
             &mut effective,
-            validate,
+            &mut origins,
         )?
     {
         sources.push(ConfigSource {
@@ -2087,7 +2179,7 @@ fn load_with_validation(
             ConfigSourceKind::User,
             false,
             &mut effective,
-            validate,
+            &mut origins,
         )?
     {
         sources.push(ConfigSource {
@@ -2101,7 +2193,7 @@ fn load_with_validation(
             ConfigSourceKind::Explicit,
             true,
             &mut effective,
-            validate,
+            &mut origins,
         )?;
         sources.push(ConfigSource {
             kind: ConfigSourceKind::Explicit,
@@ -2110,30 +2202,20 @@ fn load_with_validation(
     }
     for value in &options.overrides {
         let overlay = parse_override(value)?;
+        let _: AppConfig = overlay
+            .clone()
+            .try_into()
+            .map_err(|error: toml::de::Error| {
+                render_override_diagnostic(value, &ConfigError::new(error.to_string()))
+            })?;
+        origins.record(ConfigInput::Override(value.clone()), &overlay);
         merge_value(&mut effective, overlay);
-        validate_effective(&effective, validate).map_err(|error| {
-            let reason = error.0.strip_prefix("error: ").unwrap_or(&error.0);
-            let assignment = parse_assignment(value, 0, "")
-                .expect("a parsed --set override always contains an assignment");
-            let span = if reason.contains("unknown field") {
-                assignment.1.key
-            } else {
-                assignment.1.value
-            };
-            render_source_diagnostic(
-                "unusable --set override",
-                Path::new("<command line>"),
-                value,
-                Some(span),
-                reason,
-            )
-        })?;
     }
 
     let config: AppConfig = effective
         .try_into()
         .map_err(|error| ConfigError::new(format!("invalid effective configuration: {error}")))?;
-    validate(&config)?;
+    validate(&config).map_err(|error| origins.render(error))?;
     Ok(LoadedConfig { config, sources })
 }
 
@@ -2160,7 +2242,7 @@ fn load_file(
     kind: ConfigSourceKind,
     required: bool,
     effective: &mut toml::Value,
-    validate: fn(&AppConfig) -> Result<(), ConfigError>,
+    origins: &mut ConfigOrigins,
 ) -> Result<bool, ConfigError> {
     match std::fs::metadata(path) {
         Ok(metadata) if !metadata.is_file() => {
@@ -2257,21 +2339,16 @@ fn load_file(
         .map_err(|error| render_toml_diagnostic(kind, path, &content, &error))?;
     let overlay: toml::Value = toml::from_str(&content)
         .map_err(|error| render_toml_diagnostic(kind, path, &content, &error))?;
+    origins.record(
+        ConfigInput::File {
+            kind,
+            path: path.to_path_buf(),
+            content,
+        },
+        &overlay,
+    );
     merge_value(effective, overlay);
-    validate_effective(effective, validate)
-        .map_err(|error| render_validation_diagnostic(kind, path, &content, &error))?;
     Ok(true)
-}
-
-fn validate_effective(
-    value: &toml::Value,
-    validate: fn(&AppConfig) -> Result<(), ConfigError>,
-) -> Result<(), ConfigError> {
-    let config = value
-        .clone()
-        .try_into::<AppConfig>()
-        .map_err(|error| ConfigError::new(error.to_string()))?;
-    validate(&config)
 }
 
 fn merge_value(base: &mut toml::Value, overlay: toml::Value) {
@@ -2772,6 +2849,300 @@ mod tests {
         assert_eq!(loaded.config.search.backend, SearchBackend::Auto);
         assert_eq!(loaded.config.search.exclude_directory_names, ["second"]);
         assert_eq!(loaded.sources.len(), 2);
+    }
+
+    #[test]
+    fn semantic_overrides_are_checked_after_merging() {
+        for loader in [load, load_for_cli] {
+            for overrides in [
+                vec![
+                    "gui.status.min_font_size=100",
+                    "gui.status.max_font_size=200",
+                ],
+                vec![
+                    "gui.status.max_font_size=200",
+                    "gui.status.min_font_size=100",
+                ],
+            ] {
+                let loaded = loader(&LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    overrides: overrides.into_iter().map(str::to_owned).collect(),
+                    ..Default::default()
+                })
+                .unwrap();
+                assert_eq!(loaded.config.gui.status.min_font_size, 100.0);
+                assert_eq!(loaded.config.gui.status.max_font_size, 200.0);
+            }
+            let loaded = loader(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                overrides: [
+                    "version=2",
+                    "version=1",
+                    "gui.window.width=1",
+                    "gui.window.width=800",
+                    "gui.status.success_text=\"{bad}\"",
+                    "gui.status.success_text=\"Done\"",
+                    "icons.sources=[]",
+                    "icons.enabled=false",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(loaded.config.gui.window.width, 800.0);
+            assert_eq!(loaded.config.gui.status.success_text, "Done");
+            assert!(!loaded.config.icons.enabled);
+        }
+    }
+
+    #[test]
+    fn semantic_file_layers_are_checked_after_merging() {
+        let minimum = TempConfig::new("[gui.status]\nmin_font_size=100\n");
+        let maximum = TempConfig::new("[gui.status]\nmax_font_size=200\n");
+        let invalid_width = TempConfig::new("[gui.window]\nwidth=1\n");
+        for loader in [load, load_for_cli] {
+            for files in [
+                vec![minimum.0.clone(), maximum.0.clone()],
+                vec![maximum.0.clone(), minimum.0.clone()],
+            ] {
+                let loaded = loader(&LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: files,
+                    ..Default::default()
+                })
+                .unwrap();
+                assert_eq!(loaded.config.gui.status.min_font_size, 100.0);
+                assert_eq!(loaded.config.gui.status.max_font_size, 200.0);
+                assert_eq!(loaded.sources.len(), 2);
+            }
+            let loaded = loader(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                explicit_files: vec![invalid_width.0.clone()],
+                overrides: vec!["gui.window.width=800".into()],
+            })
+            .unwrap();
+            assert_eq!(loaded.config.gui.window.width, 800.0);
+        }
+    }
+
+    #[test]
+    fn higher_layers_can_replace_unavailable_resources() {
+        let file = TempConfig::new("");
+        let missing =
+            toml::Value::String(file.0.with_extension("missing").to_string_lossy().into());
+        let image = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/32x32.png");
+        let image = toml::Value::String(image.to_string_lossy().into());
+        let directory = toml::Value::String(std::env::temp_dir().to_string_lossy().into());
+        let lower = TempConfig::new(&format!(
+            "[search]\nroots=[{missing}]\n[gui.background]\npath={missing}\n\
+             [gui.fonts]\nmode='custom'\n[icons]\nfallback_path={missing}\n"
+        ));
+        let higher = TempConfig::new(&format!(
+            "[search]\nroots=[{directory}]\n[gui.background]\npath={image}\n\
+             [gui.fonts]\nmode='system'\n[icons]\nfallback_path={image}\n"
+        ));
+        for loader in [load, load_for_cli] {
+            let loaded = loader(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                explicit_files: vec![lower.0.clone(), higher.0.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(loaded.config.gui.fonts.mode, FontMode::System);
+            assert_eq!(loaded.sources.len(), 2);
+        }
+    }
+
+    #[test]
+    fn custom_font_chains_can_be_supplied_after_selecting_custom_mode() {
+        let face = super::system_font_for_tests();
+        let path = toml::Value::String(face.path.unwrap().to_string_lossy().into());
+        let mut overrides = vec!["gui.fonts.mode=\"custom\"".into()];
+        for role in ["title", "card_regular", "card_bold", "footer"] {
+            overrides.push(format!(
+                "gui.fonts.{role}=[{{path={path},index={}}}]",
+                face.index
+            ));
+        }
+        for loader in [load, load_for_cli] {
+            let loaded = loader(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                overrides: overrides.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(loaded.config.gui.fonts.mode, FontMode::Custom);
+            assert_eq!(loaded.config.gui.fonts.title.len(), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_input_types_cannot_be_hidden_by_later_layers() {
+        for (invalid, replacement, marker, reason) in [
+            (
+                "gui.window.width='wide'",
+                "gui.window.width=800",
+                "'wide'",
+                "invalid type",
+            ),
+            (
+                "gui.fonts.mode='embedded'",
+                "gui.fonts.mode='system'",
+                "'embedded'",
+                "unknown variant",
+            ),
+            (
+                "gui.window.unknown=true",
+                "gui.window={width=800}",
+                "gui.window.unknown",
+                "unknown field",
+            ),
+            (
+                "icons.max_file_bytes='8MiB'",
+                "icons.max_file_bytes=8388608",
+                "'8MiB'",
+                "invalid type",
+            ),
+            (
+                "gui.window.width=[",
+                "gui.window.width=800",
+                "[",
+                "unclosed array",
+            ),
+        ] {
+            let lower = TempConfig::new(invalid);
+            let higher = TempConfig::new(replacement);
+            for loader in [load, load_for_cli] {
+                for options in [
+                    LoadOptions {
+                        no_system: true,
+                        no_user: true,
+                        explicit_files: vec![lower.0.clone(), higher.0.clone()],
+                        ..Default::default()
+                    },
+                    LoadOptions {
+                        no_system: true,
+                        no_user: true,
+                        overrides: vec![invalid.into(), replacement.into()],
+                        ..Default::default()
+                    },
+                ] {
+                    let message = loader(&options).unwrap_err().to_string();
+                    assert!(message.contains(reason), "{message}");
+                    // TOML reports an unclosed file array at EOF, while --set marks its value.
+                    let expected = if !options.explicit_files.is_empty() {
+                        match reason {
+                            "unknown field" => "unknown",
+                            "unclosed array" => "",
+                            _ => marker,
+                        }
+                    } else {
+                        marker
+                    };
+                    assert_eq!(marked_fragment(&message), expected, "{message}");
+                    if !options.explicit_files.is_empty() {
+                        assert!(
+                            message.contains(&lower.0.display().to_string()),
+                            "{message}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_semantic_errors_report_the_effective_file_source() {
+        let lower = TempConfig::new("[gui.window]\nwidth=1\n");
+        for (content, replaced) in [
+            ("gui={window={height=700}}\n", false),
+            ("[gui.window]\nwidth=2\n", true),
+        ] {
+            let higher = TempConfig::new(content);
+            for loader in [load, load_for_cli] {
+                let message = loader(&LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: vec![lower.0.clone(), higher.0.clone()],
+                    overrides: vec!["cli.pretty=false".into()],
+                })
+                .unwrap_err()
+                .to_string();
+                let expected = if replaced { &higher.0 } else { &lower.0 };
+                assert!(
+                    message.contains(&expected.display().to_string()),
+                    "{message}"
+                );
+                assert_eq!(marked_fragment(&message), if replaced { "2" } else { "1" });
+            }
+        }
+    }
+
+    #[test]
+    fn final_semantic_errors_report_the_effective_override_source() {
+        for (invalid, marker) in [
+            ("gui.window.width=1", "1"),
+            ("gui.status.max_font_size=5", "5"),
+            ("gui.fonts.mode='custom'", "'custom'"),
+            ("gui={window={width=2}}", "{window={width=2}}"),
+            ("icons.neighbor.names=['{bad}.png']", "['{bad}.png']"),
+        ] {
+            for loader in [load, load_for_cli] {
+                let message = loader(&LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    overrides: vec![invalid.into(), "cli.pretty=false".into()],
+                    ..Default::default()
+                })
+                .unwrap_err()
+                .to_string();
+                assert!(message.contains(invalid), "{message}");
+                assert!(message.contains("<command line>:1:"), "{message}");
+                assert_eq!(marked_fragment(&message), marker, "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn replaced_font_arrays_report_their_own_source() {
+        let face = super::system_font_for_tests();
+        let path = toml::Value::String(face.path.unwrap().to_string_lossy().into());
+        let mut content = "[gui.fonts]\nmode='custom'\n".to_owned();
+        for role in ["title", "card_regular", "card_bold", "footer"] {
+            content.push_str(&format!("{role}=[{{path={path},index={}}}]\n", face.index));
+        }
+        let lower = TempConfig::new(&content);
+        let missing =
+            toml::Value::String(lower.0.with_extension("missing").to_string_lossy().into());
+        let array = format!(
+            "[{{path={path},index={}}},{{path={missing},index=0}}]",
+            face.index
+        );
+        let higher = TempConfig::new(&format!("[gui.fonts]\ntitle={array}\n"));
+        let message = load(&LoadOptions {
+            no_system: true,
+            no_user: true,
+            explicit_files: vec![lower.0.clone(), higher.0.clone()],
+            overrides: vec!["cli.pretty=false".into()],
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            message.contains("gui.fonts.title[1] cannot open"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&higher.0.display().to_string()),
+            "{message}"
+        );
+        assert_eq!(marked_fragment(&message), array, "{message}");
     }
 
     #[test]
