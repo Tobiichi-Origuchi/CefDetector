@@ -1942,7 +1942,8 @@ mod tests {
         format_size, schedule_repaint, scroll_from_thumb_drag, title_font_size,
     };
 
-    #[cfg(unix)]
+    // APFS rejects the non-UTF-8 fixture names used by this test.
+    #[cfg(target_os = "linux")]
     #[test]
     fn search_batches_keep_native_paths_and_their_own_icons() {
         use std::collections::HashMap;

@@ -859,7 +859,8 @@ mod tests {
 
     static NEXT_BINARY: AtomicU64 = AtomicU64::new(0);
 
-    #[cfg(unix)]
+    // APFS rejects the non-UTF-8 fixture names used by this test.
+    #[cfg(target_os = "linux")]
     #[test]
     fn scan_results_preserve_distinct_native_paths() {
         use std::os::unix::ffi::OsStrExt as _;
