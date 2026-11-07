@@ -683,7 +683,12 @@ pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
                     config
                         .linux
                         .package_managers
-                        .then(|| crate::package_manager::find_icon_via_package_manager(exe_path))
+                        .then(|| {
+                            crate::package_manager::find_icon_via_package_manager(
+                                exe_path,
+                                &config.linux.package_query,
+                            )
+                        })
                         .flatten()
                         .as_deref()
                         .and_then(|path| try_icon_from_path(path, config.max_file_bytes))

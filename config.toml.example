@@ -351,6 +351,17 @@ package_managers = true
 # Additional absolute readable icon-theme directories. Allowed: any array.
 theme_directories = []
 
+[icons.linux.package_query]
+# Timeout for each Pacman/dpkg/RPM/Portage command, including output collection.
+# Integer milliseconds; allowed range: 100..600000. Unused on Windows/macOS.
+# Package ownership and file-list commands each receive their own timeout.
+timeout_ms = 30000
+# Maximum stdout and stderr size, each, as an integer byte count.
+# Integers are clamped to 1..67108864; other types are configuration errors.
+# Timeouts or oversized streams fail this icon source; lookup continues.
+# These limits do not apply to filesystem-based Snap/Flatpak/Nix/Brew lookup.
+max_output_bytes = 8388608
+
 [cli]
 # Pretty-print JSON and TOML.
 pretty = true

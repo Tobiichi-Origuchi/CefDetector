@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
+use crate::config::PackageQueryConfig;
+
 static PM_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -42,8 +44,13 @@ fn fs_metadata_is_executable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-fn get_command_output(cmd: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(cmd).args(args).output().ok()?;
+fn get_command_output(cmd: &str, args: &[&str], config: &PackageQueryConfig) -> Option<String> {
+    let output = crate::command::output(
+        Command::new(cmd).args(args),
+        config.timeout_ms,
+        config.max_output_bytes,
+    )
+    .ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -74,30 +81,34 @@ fn collect_files_recursive(dirs: &[PathBuf], files: &mut Vec<PathBuf>) {
 
 // Traditional package managers (pacman, dpkg, rpm, portage)
 
-fn query_pacman(exe_path: &str) -> Option<Vec<PathBuf>> {
-    let pkg = get_command_output("pacman", &["-Qoq", exe_path])?;
-    let files = get_command_output("pacman", &["-Qlq", &pkg])?;
+fn query_pacman(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+    let pkg = get_command_output("pacman", &["-Qoq", exe_path], config)?;
+    let files = get_command_output("pacman", &["-Qlq", &pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
-fn query_dpkg(exe_path: &str) -> Option<Vec<PathBuf>> {
-    let output = get_command_output("dpkg-query", &["-S", exe_path])?;
+fn query_dpkg(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+    let output = get_command_output("dpkg-query", &["-S", exe_path], config)?;
     // Output format: "pkgname: /path/to/file" or "pkgname:arch: /path/to/file"
     let pkg = output.split(':').next()?.trim();
-    let files = get_command_output("dpkg-query", &["-L", pkg])?;
+    let files = get_command_output("dpkg-query", &["-L", pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
-fn query_rpm(exe_path: &str) -> Option<Vec<PathBuf>> {
+fn query_rpm(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
     // This covers Fedora (dnf), RHEL, openSUSE (zypper)
-    let pkg = get_command_output("rpm", &["-qf", exe_path, "--queryformat", "%{NAME}"])?;
-    let files = get_command_output("rpm", &["-ql", &pkg])?;
+    let pkg = get_command_output(
+        "rpm",
+        &["-qf", exe_path, "--queryformat", "%{NAME}"],
+        config,
+    )?;
+    let files = get_command_output("rpm", &["-ql", &pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
-fn query_portage(exe_path: &str) -> Option<Vec<PathBuf>> {
-    let pkg = get_command_output("qfile", &["-qC", exe_path])?;
-    let files = get_command_output("qlist", &[&pkg])?;
+fn query_portage(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+    let pkg = get_command_output("qfile", &["-qC", exe_path], config)?;
+    let files = get_command_output("qlist", &[&pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
@@ -237,16 +248,19 @@ fn is_system_package_path(exe_path: &Path) -> bool {
         .any(|root| exe_path.starts_with(root))
 }
 
-fn query_traditional_package_manager(exe_path: &Path) -> Option<Vec<PathBuf>> {
+fn query_traditional_package_manager(
+    exe_path: &Path,
+    config: &PackageQueryConfig,
+) -> Option<Vec<PathBuf>> {
     if !is_system_package_path(exe_path) {
         return None;
     }
     let path = exe_path.to_string_lossy();
     match *TRADITIONAL_PACKAGE_MANAGER {
-        Some(TraditionalPackageManager::Pacman) => query_pacman(&path),
-        Some(TraditionalPackageManager::Dpkg) => query_dpkg(&path),
-        Some(TraditionalPackageManager::Rpm) => query_rpm(&path),
-        Some(TraditionalPackageManager::Portage) => query_portage(&path),
+        Some(TraditionalPackageManager::Pacman) => query_pacman(&path, config),
+        Some(TraditionalPackageManager::Dpkg) => query_dpkg(&path, config),
+        Some(TraditionalPackageManager::Rpm) => query_rpm(&path, config),
+        Some(TraditionalPackageManager::Portage) => query_portage(&path, config),
         None => None,
     }
 }
@@ -330,7 +344,10 @@ fn select_icon(files: Vec<PathBuf>) -> Option<PathBuf> {
     best_icon
 }
 
-pub fn find_icon_via_package_manager(exe_path: &Path) -> Option<PathBuf> {
+pub fn find_icon_via_package_manager(
+    exe_path: &Path,
+    config: &PackageQueryConfig,
+) -> Option<PathBuf> {
     if let Some(cached) = PM_CACHE.lock().unwrap().get(exe_path) {
         return cached.clone();
     }
@@ -344,7 +361,7 @@ pub fn find_icon_via_package_manager(exe_path: &Path) -> Option<PathBuf> {
     } else if exe_path.to_string_lossy().contains(".linuxbrew/Cellar/") {
         query_brew(exe_path)
     } else {
-        query_traditional_package_manager(exe_path)
+        query_traditional_package_manager(exe_path, config)
     };
 
     let best_icon = files.and_then(select_icon);
@@ -360,7 +377,46 @@ pub fn find_icon_via_package_manager(exe_path: &Path) -> Option<PathBuf> {
 mod tests {
     use std::path::Path;
 
-    use super::{is_system_package_path, select_icon};
+    use super::{PackageQueryConfig, get_command_output, is_system_package_path, select_icon};
+
+    #[test]
+    fn command_output_preserves_trimming_and_failure_semantics() {
+        let config = PackageQueryConfig {
+            timeout_ms: 2000,
+            max_output_bytes: 64,
+        };
+        assert_eq!(
+            get_command_output(
+                "/bin/sh",
+                &["-c", "printf '  package-name \\n'; printf ignored >&2"],
+                &config,
+            ),
+            Some("package-name".into())
+        );
+        assert_eq!(
+            get_command_output("/bin/sh", &["-c", "printf package-name; exit 1"], &config),
+            None
+        );
+    }
+
+    #[test]
+    fn command_limits_apply_to_raw_streams_before_parsing() {
+        let config = PackageQueryConfig {
+            timeout_ms: 100,
+            max_output_bytes: 3,
+        };
+        assert_eq!(
+            get_command_output("/bin/sh", &["-c", "printf abc"], &config),
+            Some("abc".into())
+        );
+        for script in ["printf 'x    '", "printf ok; printf 1234 >&2"] {
+            assert_eq!(
+                get_command_output("/bin/sh", &["-c", script], &config),
+                None
+            );
+        }
+        assert_eq!(get_command_output("/bin/sleep", &["0.6"], &config), None);
+    }
 
     #[test]
     fn traditional_package_queries_are_limited_to_system_paths() {

@@ -1191,6 +1191,7 @@ impl Default for NeighborIconConfig {
 pub struct LinuxIconConfig {
     pub desktop_files: bool,
     pub package_managers: bool,
+    pub package_query: PackageQueryConfig,
     pub theme_directories: Vec<PathBuf>,
 }
 
@@ -1199,7 +1200,25 @@ impl Default for LinuxIconConfig {
         Self {
             desktop_files: true,
             package_managers: true,
+            package_query: PackageQueryConfig::default(),
             theme_directories: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PackageQueryConfig {
+    pub timeout_ms: u64,
+    #[serde(deserialize_with = "deserialize_byte_limit")]
+    pub max_output_bytes: u64,
+}
+
+impl Default for PackageQueryConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 30_000,
+            max_output_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -1938,6 +1957,10 @@ fn validate_gui(config: &GuiConfig, check_gui_resources: bool) -> Result<(), Con
 }
 
 fn validate_icons(config: &IconConfig, check_gui_resources: bool) -> Result<(), ConfigError> {
+    validate_timeout(
+        "icons.linux.package_query.timeout_ms",
+        config.linux.package_query.timeout_ms,
+    )?;
     if config.decode_max_size == 0 || config.decode_max_size > 4096 {
         return Err(ConfigError::new(
             "icons.decode_max_size must be between 1 and 4096",
@@ -2771,6 +2794,94 @@ mod tests {
             assert!(message.contains("between 100 and 600000"), "{message}");
             assert_eq!(marked_fragment(&message), value, "{message}");
             let message = override_error(&format!("gui.fonts.system_query.timeout_ms={value}"));
+            assert!(message.contains("between 100 and 600000"), "{message}");
+            assert_eq!(marked_fragment(&message), value, "{message}");
+        }
+    }
+
+    #[test]
+    fn package_query_limits_default_and_clamp_in_files_and_overrides() {
+        let default = AppConfig::default().icons.linux.package_query;
+        assert_eq!(default.timeout_ms, 30_000);
+        assert_eq!(default.max_output_bytes, 8_388_608);
+        for (input, expected) in [
+            (i64::MIN, 1),
+            (0, 1),
+            (1, 1),
+            (8_388_608, 8_388_608),
+            (67_108_864, 67_108_864),
+            (67_108_865, 67_108_864),
+            (i64::MAX, 67_108_864),
+        ] {
+            let file = TempConfig::new(&format!(
+                "[icons.linux.package_query]\nmax_output_bytes={input}\n"
+            ));
+            for options in [
+                LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    explicit_files: vec![file.0.clone()],
+                    ..Default::default()
+                },
+                LoadOptions {
+                    no_system: true,
+                    no_user: true,
+                    overrides: vec![format!(
+                        "icons.linux.package_query.max_output_bytes={input}"
+                    )],
+                    ..Default::default()
+                },
+            ] {
+                let loaded = load_for_cli(&options).unwrap();
+                assert_eq!(
+                    loaded.config.icons.linux.package_query.max_output_bytes,
+                    expected
+                );
+                assert_eq!(loaded.config.icons.linux.package_query.timeout_ms, 30_000);
+            }
+        }
+        for timeout in [100, 30_000, 600_000] {
+            let file = TempConfig::new(&format!(
+                "[icons.linux.package_query]\ntimeout_ms={timeout}\n"
+            ));
+            let loaded = load_for_cli(&LoadOptions {
+                no_system: true,
+                no_user: true,
+                explicit_files: vec![file.0.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(loaded.config.icons.linux.package_query.timeout_ms, timeout);
+            assert_eq!(
+                loaded.config.icons.linux.package_query.max_output_bytes,
+                8_388_608
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_package_query_limits_report_the_source() {
+        for field in ["timeout_ms", "max_output_bytes"] {
+            for value in ["'8MiB'", "1.5", "true", "[]", "{}"] {
+                let message =
+                    file_error(&format!("[icons.linux.package_query]\n{field}={value}\n"));
+                assert!(
+                    message.contains("invalid explicit configuration"),
+                    "{message}"
+                );
+                assert_eq!(marked_fragment(&message), value, "{message}");
+                let message = override_error(&format!("icons.linux.package_query.{field}={value}"));
+                assert!(message.contains("unusable --set override"), "{message}");
+                assert_eq!(marked_fragment(&message), value, "{message}");
+            }
+        }
+        for value in ["0", "99", "600001"] {
+            let message = file_error(&format!(
+                "[icons.linux.package_query]\ntimeout_ms={value}\n"
+            ));
+            assert!(message.contains("between 100 and 600000"), "{message}");
+            assert_eq!(marked_fragment(&message), value, "{message}");
+            let message = override_error(&format!("icons.linux.package_query.timeout_ms={value}"));
             assert!(message.contains("between 100 and 600000"), "{message}");
             assert_eq!(marked_fragment(&message), value, "{message}");
         }
