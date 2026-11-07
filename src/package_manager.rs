@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -230,25 +231,29 @@ fn query_nix(exe_path: &Path) -> Option<Vec<PathBuf>> {
 
 fn query_brew(exe_path: &Path) -> Option<Vec<PathBuf>> {
     // Brew paths: /home/linuxbrew/.linuxbrew/Cellar/<name>/<version>/bin/...
-    let path_str = exe_path.to_string_lossy();
-    if !path_str.contains(".linuxbrew/Cellar/") {
+    let path = exe_path.as_os_str().as_bytes();
+    if !path
+        .windows(b".linuxbrew/Cellar/".len())
+        .any(|part| part == b".linuxbrew/Cellar/")
+    {
         return None;
     }
 
-    let parts: Vec<&str> = path_str.split('/').collect();
+    let parts: Vec<_> = path.split(|byte| *byte == b'/').collect();
     // find index of "Cellar"
-    let cellar_idx = parts.iter().position(|&r| r == "Cellar")?;
+    let cellar_idx = parts.iter().position(|&part| part == b"Cellar")?;
     if parts.len() < cellar_idx + 3 {
         return None;
     }
 
-    let root_path = parts[..cellar_idx + 3].join("/");
+    let root_path = parts[..cellar_idx + 3].join(b"/".as_slice());
+    let root_path = Path::new(OsStr::from_bytes(&root_path));
 
     let mut files = Vec::new();
     collect_files_recursive(
         &[
-            Path::new(&root_path).join("share/icons"),
-            Path::new(&root_path).join("share/pixmaps"),
+            root_path.join("share/icons"),
+            root_path.join("share/pixmaps"),
         ],
         &mut files,
     );
@@ -395,6 +400,58 @@ mod tests {
     use std::path::Path;
 
     use super::{PackageQueryConfig, get_command_output, is_system_package_path, select_icon};
+
+    #[test]
+    fn brew_queries_preserve_native_installation_prefixes() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::path::PathBuf;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-brew-native-{}", std::process::id())),
+        );
+        fs::create_dir(&root.0).unwrap();
+        let mut applications = Vec::new();
+        for name in [
+            OsString::from_vec(b"prefix-\xff".to_vec()),
+            OsString::from_vec(b"prefix-\xfe".to_vec()),
+            OsString::from("prefix-�"),
+            OsString::from("中文 prefix"),
+        ] {
+            let package = root.0.join(name).join(".linuxbrew/Cellar/native-app/1.0");
+            let executable = package.join("bin/native-app");
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(&executable, []).unwrap();
+            let icon = package.join("share/icons/32x32/apps/native.png");
+            fs::create_dir_all(icon.parent().unwrap()).unwrap();
+            fs::write(&icon, include_bytes!("../icons/32x32.png")).unwrap();
+            applications.push((executable, icon));
+        }
+        assert_ne!(applications[0].0, applications[1].0);
+        assert_eq!(
+            applications[0].0.to_string_lossy(),
+            applications[2].0.to_string_lossy()
+        );
+        assert_eq!(
+            applications[1].0.to_string_lossy(),
+            applications[2].0.to_string_lossy()
+        );
+        let config = PackageQueryConfig::default();
+        for (executable, icon) in applications {
+            assert_eq!(super::query_brew(&executable), Some(vec![icon.clone()]));
+            assert_eq!(
+                super::find_icon_via_package_manager(&executable, &config),
+                Some(icon)
+            );
+        }
+    }
 
     #[test]
     fn traditional_queries_preserve_native_path_arguments() {
