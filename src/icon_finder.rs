@@ -31,7 +31,7 @@ static DESKTOP_CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(target_os = "linux")]
-static DESKTOP_INDEX: LazyLock<Mutex<Option<HashMap<String, String>>>> =
+static DESKTOP_INDEX: LazyLock<Mutex<Option<HashMap<OsString, String>>>> =
     LazyLock::new(|| Mutex::new(None));
 
 #[cfg(target_os = "linux")]
@@ -234,7 +234,7 @@ pub fn find_icon_via_desktop_file(exe_path: &Path, config: &IconConfig) -> Optio
         return cached.clone();
     }
 
-    let exe_name = exe_path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let exe_name = exe_path.file_name()?.to_ascii_lowercase();
     let icon = {
         let mut index = DESKTOP_INDEX.lock().unwrap();
         let index = index.get_or_insert_with(build_desktop_index);
@@ -330,7 +330,7 @@ fn desktop_exec_tokens(command: &str) -> Vec<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn executable_name(command: &str) -> Option<String> {
+fn executable_name(command: &str) -> Option<OsString> {
     let tokens = desktop_exec_tokens(command);
     let mut tokens = tokens.iter().map(String::as_str);
     let mut token = tokens.next()?;
@@ -342,11 +342,11 @@ fn executable_name(command: &str) -> Option<String> {
     }
     Path::new(token)
         .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .map(|name| name.to_ascii_lowercase())
 }
 
 #[cfg(target_os = "linux")]
-fn parse_desktop_entry(content: &str) -> Option<(Vec<String>, String)> {
+fn parse_desktop_entry(content: &str) -> Option<(Vec<OsString>, String)> {
     let mut in_desktop_entry = false;
     let mut executable_names = Vec::new();
     let mut icon = None;
@@ -381,7 +381,7 @@ fn parse_desktop_entry(content: &str) -> Option<(Vec<String>, String)> {
 }
 
 #[cfg(target_os = "linux")]
-fn build_desktop_index() -> HashMap<String, String> {
+fn build_desktop_index() -> HashMap<OsString, String> {
     let mut index = HashMap::new();
     for dir in desktop_search_dirs() {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -1311,6 +1311,91 @@ mod tests {
     };
 
     #[test]
+    fn desktop_lookup_distinguishes_native_names_from_replacement_characters() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        const CHILD_ROOT: &str = "CEFDETECTOR_TEST_DESKTOP_NATIVE_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let content = fs::read_to_string(root.join("native.desktop")).unwrap();
+            let (names, icon) = parse_desktop_entry(&content).unwrap();
+            *super::DESKTOP_INDEX.lock().unwrap() =
+                Some(names.into_iter().map(|name| (name, icon.clone())).collect());
+            let config = crate::config::IconConfig {
+                sources: vec![
+                    crate::config::IconSource::Desktop,
+                    crate::config::IconSource::Builtin,
+                ],
+                ..Default::default()
+            };
+            for name in [
+                OsString::from_vec(b"APP-\xff".to_vec()),
+                OsString::from_vec(b"APP-\xfe".to_vec()),
+            ] {
+                let path = root.join(name);
+                fs::write(&path, []).unwrap();
+                assert_eq!(super::find_icon_via_desktop_file(&path, &config), None);
+                let RawIcon::PngOrIco(bytes) = super::get_app_icon(&path, &config) else {
+                    panic!("unmatched native name did not continue to the builtin icon");
+                };
+                assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
+            }
+            for name in ["APP-�", "示例APP"] {
+                let path = root.join(name);
+                fs::write(&path, []).unwrap();
+                assert_eq!(
+                    super::find_icon_via_desktop_file(&path, &config),
+                    Some(root.join("icon.png"))
+                );
+                let RawIcon::PngOrIco(bytes) = super::get_app_icon(&path, &config) else {
+                    panic!("matching Unicode name lost its desktop icon");
+                };
+                assert_eq!(&*bytes, include_bytes!("../icons/32x32.png"));
+            }
+            return;
+        }
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-desktop-native-{}", std::process::id())),
+        );
+        fs::create_dir(&root.0).unwrap();
+        let icon = root.0.join("icon.png");
+        fs::write(&icon, include_bytes!("../icons/32x32.png")).unwrap();
+        fs::write(
+            root.0.join("native.desktop"),
+            format!(
+                "[Desktop Entry]\nExec=/opt/App-� %U\nTryExec=示例App\nIcon={}\n",
+                icon.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "icon_finder::tests::desktop_lookup_distinguishes_native_names_from_replacement_characters",
+            ])
+            .env(CHILD_ROOT, &root.0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn squashfs_magic_search_handles_boundaries_and_returns_the_first_match() {
         for position in [
             0, 1, 8188, 8189, 8190, 8191, 8192, 8193, 16378, 16379, 16380, 16381,
@@ -1375,7 +1460,7 @@ mod tests {
         );
         assert_eq!(
             executable_name("env FOO=bar \"/opt/My App/app\" --flag %U").as_deref(),
-            Some("app")
+            Some(std::ffi::OsStr::new("app"))
         );
     }
 
