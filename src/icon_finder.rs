@@ -622,12 +622,10 @@ pub fn configured_fallback_icon(config: &IconConfig) -> RawIcon {
         .unwrap_or_else(|| DEFAULT_ICON.clone())
 }
 
-pub fn get_app_icon(path: String, config: &IconConfig) -> RawIcon {
+pub fn get_app_icon(exe_path: &Path, config: &IconConfig) -> RawIcon {
     if !config.enabled {
         return RawIcon::Empty;
     }
-    let exe_path = Path::new(&path);
-
     if let Some(cached) = RAW_ICON_CACHE.lock().unwrap().get(exe_path) {
         return cached.clone();
     }
@@ -873,8 +871,7 @@ mod input_tests {
             sources: vec![IconSource::Pe],
             ..Default::default()
         };
-        let RawIcon::PngOrIco(bytes) = get_app_icon(path.to_string_lossy().into_owned(), &config)
-        else {
+        let RawIcon::PngOrIco(bytes) = get_app_icon(&path, &config) else {
             panic!("an oversized first PE group blocked the smaller group");
         };
         assert_eq!(bytes.len() as u64, maximum);
@@ -955,7 +952,7 @@ mod input_tests {
                     "empty" => {}
                     _ => unreachable!(),
                 }
-                let actual = get_app_icon(path.to_string_lossy().into_owned(), &config);
+                let actual = get_app_icon(&path, &config);
                 match (name, actual) {
                     ("sibling" | "parent", RawIcon::PngOrIco(bytes)) => {
                         assert_eq!(bytes.len() as u64, 6 + 16 + image.len() as u64);
@@ -1003,9 +1000,7 @@ mod input_tests {
                     find_icon_via_appimage(&path, config.max_appimage_icon_bytes).is_none(),
                     "{name}"
                 );
-                let RawIcon::PngOrIco(bytes) =
-                    get_app_icon(path.to_string_lossy().into_owned(), &config)
-                else {
+                let RawIcon::PngOrIco(bytes) = get_app_icon(&path, &config) else {
                     panic!("{name} did not continue to the builtin source");
                 };
                 assert_eq!(&*bytes, include_bytes!("../icons/default_cef_icon.ico"));
@@ -1138,7 +1133,7 @@ mod input_tests {
                 config.max_file_bytes = 1;
                 config.max_appimage_icon_bytes = icon.len() as u64;
             }
-            let actual = get_app_icon(path.to_string_lossy().into_owned(), &config);
+            let actual = get_app_icon(&path, &config);
             match (name, actual) {
                 ("neighbor", RawIcon::Svg(bytes)) => assert_eq!(&*bytes, neighbor),
                 ("builtin", RawIcon::PngOrIco(bytes)) => {
@@ -1220,7 +1215,7 @@ mod input_tests {
         };
         let app = root.0.join("with-builtin");
         fs::write(&app, []).unwrap();
-        let actual = get_app_icon(app.to_string_lossy().into_owned(), &config);
+        let actual = get_app_icon(&app, &config);
         let RawIcon::PngOrIco(bytes) = actual else {
             panic!("oversized neighboring icon did not use the builtin fallback");
         };
@@ -1235,10 +1230,7 @@ mod input_tests {
         config.sources = vec![IconSource::Neighbor];
         let app = root.0.join("without-builtin");
         fs::write(&app, []).unwrap();
-        assert!(matches!(
-            get_app_icon(app.to_string_lossy().into_owned(), &config),
-            RawIcon::Empty
-        ));
+        assert!(matches!(get_app_icon(&app, &config), RawIcon::Empty));
     }
 }
 

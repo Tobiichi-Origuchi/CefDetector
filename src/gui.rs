@@ -50,7 +50,7 @@ impl fmt::Display for GuiError {
 impl std::error::Error for GuiError {}
 
 struct PendingItem {
-    file: String,
+    file: PathBuf,
     app_type: String,
     size: u64,
     is_running: bool,
@@ -60,7 +60,7 @@ struct PendingItem {
 }
 
 struct AppItem {
-    file: String,
+    file: PathBuf,
     app_type: String,
     size_str: String,
     is_running: bool,
@@ -436,10 +436,10 @@ impl Frontend {
                 let item = &self.apps[index];
                 match card_config.click_action {
                     ClickAction::Reveal => {
-                        crate::search::open_path(item.file.clone(), item.is_dir, true);
+                        crate::search::open_path(&item.file, item.is_dir, true);
                     }
                     ClickAction::Open => {
-                        crate::search::open_path(item.file.clone(), item.is_dir, false);
+                        crate::search::open_path(&item.file, item.is_dir, false);
                     }
                     ClickAction::None => {}
                 }
@@ -726,7 +726,7 @@ impl Frontend {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
         if response.clicked() {
-            crate::search::open_path(footer.url.clone(), false, false);
+            crate::search::open_path(Path::new(&footer.url), false, false);
         }
 
         let color = if response.hovered() {
@@ -795,14 +795,15 @@ fn spawn_search(
             count += 1;
             total_size += info.size;
 
-            let filename = Path::new(&info.file)
+            let filename = info
+                .file
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
             let size = info.size;
             batch.push(PendingItem {
-                icon_raw: get_app_icon(info.file.clone(), &config.icons),
+                icon_raw: get_app_icon(&info.file, &config.icons),
                 file: info.file,
                 app_type: info.app_type,
                 size,
@@ -888,7 +889,10 @@ fn sort_apps(apps: &mut [AppItem], key: SortKey, order: SortOrder) {
             SortKey::Size => left.size.cmp(&right.size),
             SortKey::Name => left.filename.cmp(&right.filename),
             SortKey::Type => left.app_type.cmp(&right.app_type),
-            SortKey::Path => left.file.cmp(&right.file),
+            SortKey::Path => left
+                .file
+                .to_string_lossy()
+                .cmp(&right.file.to_string_lossy()),
             SortKey::Running => left.is_running.cmp(&right.is_running),
         };
         match order {
@@ -1937,6 +1941,82 @@ mod tests {
         ControlFlow, TextRole, configure_custom_fonts, consume_repaint_deadline, decode_svg,
         format_size, schedule_repaint, scroll_from_thumb_drag, title_font_size,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn search_batches_keep_native_paths_and_their_own_icons() {
+        use std::collections::HashMap;
+        use std::ffi::OsStr;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-native-gui-{}", std::process::id())),
+        );
+        fs::create_dir(&root.0).unwrap();
+        let mut expected = HashMap::new();
+        for (suffix, icon) in [
+            (
+                b"\xff".as_slice(),
+                include_bytes!("../icons/32x32.png").as_slice(),
+            ),
+            (
+                b"\xfe".as_slice(),
+                include_bytes!("../icons/128x128.png").as_slice(),
+            ),
+            (
+                "�".as_bytes(),
+                include_bytes!("../icons/128x128@2x.png").as_slice(),
+            ),
+        ] {
+            let name = OsStr::from_bytes(suffix);
+            let directory = root.0.join(name);
+            fs::create_dir(&directory).unwrap();
+            fs::write(directory.join("chrome_100_percent.pak"), []).unwrap();
+            let executable = directory.join(name);
+            fs::write(&executable, b"\x7fELFcef_string_utf8_to_utf16").unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(directory.join("icon.png"), icon).unwrap();
+            expected.insert(executable, icon);
+        }
+        let mut config = crate::config::AppConfig::default();
+        config.search.backend = crate::config::SearchBackend::Filesystem;
+        config.search.roots = Some(vec![root.0.clone()]);
+        config.search.use_platform_excludes = false;
+        config.icons.sources = vec![crate::config::IconSource::Neighbor];
+        config.icons.neighbor.directories = vec![String::new()];
+        config.icons.neighbor.names = vec!["icon.png".into()];
+        let (sender, receiver) = std::sync::mpsc::channel();
+        super::spawn_search(egui::Context::default(), sender, Arc::new(config));
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(10)).unwrap() {
+                super::SearchMessage::Batch { items, .. } => {
+                    for item in items {
+                        let icon = expected.remove(&item.file).expect("unexpected native path");
+                        let crate::icon_finder::RawIcon::PngOrIco(bytes) = item.icon_raw else {
+                            panic!("native path lost its neighboring icon");
+                        };
+                        assert_eq!(&*bytes, icon);
+                        assert_eq!(item.filename, "�");
+                    }
+                }
+                super::SearchMessage::Done { count, .. } => {
+                    assert_eq!(count, 3);
+                    assert!(expected.is_empty());
+                    break;
+                }
+                super::SearchMessage::Failed(error) => panic!("search failed: {error}"),
+            }
+        }
+    }
 
     #[test]
     fn svg_icons_skip_external_images() {

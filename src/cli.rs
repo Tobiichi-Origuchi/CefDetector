@@ -282,7 +282,7 @@ fn format_json(results: &[AppInfo], pretty: bool) -> String {
         } else {
             "{\"file\":"
         });
-        push_json_string(&mut output, &result.file);
+        push_json_string(&mut output, &result.file.to_string_lossy());
         output.push_str(if pretty {
             ",\n    \"app_type\": "
         } else {
@@ -352,7 +352,7 @@ fn format_results(results: &[AppInfo], format: OutputFormat, config: &CliConfig)
                 let separator = if config.pretty { " = " } else { "=" };
                 output.push_str("[[app]]\nfile");
                 output.push_str(separator);
-                push_toml_string(&mut output, &result.file);
+                push_toml_string(&mut output, &result.file.to_string_lossy());
                 output.push_str("\napp_type");
                 output.push_str(separator);
                 push_toml_string(&mut output, &result.app_type);
@@ -379,7 +379,7 @@ fn format_results(results: &[AppInfo], format: OutputFormat, config: &CliConfig)
                 .unwrap();
             }
             for result in results {
-                push_csv_field(&mut output, &result.file);
+                push_csv_field(&mut output, &result.file.to_string_lossy());
                 output.push(delimiter);
                 push_csv_field(&mut output, &result.app_type);
                 writeln!(
@@ -398,11 +398,14 @@ fn sort_results(results: &mut [AppInfo], key: SortKey, order: SortOrder) {
     results.sort_by(|left, right| {
         let ordering = match key {
             SortKey::Size => left.size.cmp(&right.size),
-            SortKey::Name => std::path::Path::new(&left.file)
+            SortKey::Name => std::path::Path::new(left.file.to_string_lossy().as_ref())
                 .file_name()
-                .cmp(&std::path::Path::new(&right.file).file_name()),
+                .cmp(&std::path::Path::new(right.file.to_string_lossy().as_ref()).file_name()),
             SortKey::Type => left.app_type.cmp(&right.app_type),
-            SortKey::Path => left.file.cmp(&right.file),
+            SortKey::Path => left
+                .file
+                .to_string_lossy()
+                .cmp(&right.file.to_string_lossy()),
             SortKey::Running => left.is_running.cmp(&right.is_running),
         };
         if order == SortOrder::Ascending {
@@ -737,6 +740,47 @@ mod tests {
             output,
             "[\n  {\n    \"file\": \"/tmp/app\",\n    \"app_type\": \"CEF\",\n    \"size\": 42,\n    \"is_running\": true,\n    \"is_dir\": false\n  }\n]"
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_paths_keep_the_existing_text_output() {
+        let results = [AppInfo {
+            file: non_unicode_argument().into(),
+            app_type: "CEF".into(),
+            size: 42,
+            is_running: false,
+            is_dir: false,
+        }];
+        let display = results[0].file.to_string_lossy();
+        let config = CliConfig::default();
+        let json = format_results(&results, OutputFormat::Json, &config);
+        assert!(json.contains(&format!("\"file\": \"{display}\"")));
+        let output = format_results(&results, OutputFormat::Toml, &config);
+        let toml: toml::Value = toml::from_str(&output).unwrap();
+        assert_eq!(toml["app"][0]["file"].as_str(), Some(display.as_ref()));
+        let csv = format_results(&results, OutputFormat::Csv, &config);
+        assert!(csv.contains(&format!("\"{display}\",\"CEF\",42,false,false\n")));
+    }
+
+    #[test]
+    fn path_sorting_keeps_text_order_instead_of_component_order() {
+        let mut results: Vec<_> = ["/a/z", "/a-z"]
+            .map(|file| AppInfo {
+                file: file.into(),
+                app_type: "CEF".into(),
+                size: 0,
+                is_running: false,
+                is_dir: false,
+            })
+            .into();
+        super::sort_results(
+            &mut results,
+            crate::config::SortKey::Path,
+            crate::config::SortOrder::Ascending,
+        );
+        assert_eq!(results[0].file.as_os_str(), "/a-z");
+        assert_eq!(results[1].file.as_os_str(), "/a/z");
     }
 
     #[test]

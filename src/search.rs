@@ -96,18 +96,18 @@ struct FileIdentity {
 }
 
 #[cfg(all(feature = "gui", target_os = "linux"))]
-pub fn open_path(path: String, is_dir: bool, reveal: bool) {
-    if path.contains("://") || is_dir || !reveal {
+pub fn open_path(path: &Path, is_dir: bool, reveal: bool) {
+    if path.to_string_lossy().contains("://") || is_dir || !reveal {
         let _ = Command::new("xdg-open").arg(path).spawn();
-    } else if let Some(parent) = Path::new(&path).parent() {
+    } else if let Some(parent) = path.parent() {
         let _ = Command::new("xdg-open").arg(parent).spawn();
     }
 }
 
 #[cfg(all(feature = "gui", target_os = "macos"))]
-pub fn open_path(path: String, _is_dir: bool, reveal: bool) {
+pub fn open_path(path: &Path, _is_dir: bool, reveal: bool) {
     let mut command = Command::new("/usr/bin/open");
-    if reveal && !path.contains("://") {
+    if reveal && !path.to_string_lossy().contains("://") {
         command.arg("-R");
     }
     let _ = command.arg(path).spawn();
@@ -124,22 +124,23 @@ fn explorer_select_argument(path: &std::ffi::OsStr) -> std::ffi::OsString {
 }
 
 #[cfg(all(feature = "gui", target_os = "windows"))]
-pub fn open_path(path: String, is_dir: bool, reveal: bool) {
+pub fn open_path(path: &Path, is_dir: bool, reveal: bool) {
     use std::os::windows::ffi::OsStrExt as _;
 
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let operation = ['o', 'p', 'e', 'n', '\0'].map(|character| character as u16);
-    let (target, parameters) = if path.contains("://") || is_dir || !reveal {
-        let target: Vec<u16> = std::ffi::OsStr::new(&path)
+    let (target, parameters) = if path.to_string_lossy().contains("://") || is_dir || !reveal {
+        let target: Vec<u16> = path
+            .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
         (target, None)
     } else {
         let target = "explorer.exe\0".encode_utf16().collect();
-        let parameters = explorer_select_argument(std::ffi::OsStr::new(&path))
+        let parameters = explorer_select_argument(path.as_os_str())
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -827,7 +828,7 @@ where
             .is_some_and(|path| process_is_running(&running_processes, path));
 
         on_found(AppInfo {
-            file: app.display_path.to_string_lossy().into_owned(),
+            file: app.display_path,
             app_type: app.app_type.to_owned(),
             size,
             is_running,
@@ -857,6 +858,55 @@ mod tests {
     };
 
     static NEXT_BINARY: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_results_preserve_distinct_native_paths() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::{Path, PathBuf};
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let sequence = NEXT_BINARY.fetch_add(1, Ordering::Relaxed);
+        let root = Fixture(std::env::temp_dir().join(format!(
+            "cefdetector-native-paths-{}-{sequence}",
+            std::process::id()
+        )));
+        fs::create_dir(&root.0).unwrap();
+        let mut expected = Vec::new();
+        for suffix in [b"\xff".as_slice(), b"\xfe", "�".as_bytes()] {
+            let name = std::ffi::OsStr::from_bytes(suffix);
+            let directory = root.0.join(name);
+            fs::create_dir(&directory).unwrap();
+            fs::write(directory.join("chrome_100_percent.pak"), []).unwrap();
+            let executable = directory.join(name);
+            fs::write(&executable, b"\x7fELFcef_string_utf8_to_utf16").unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            expected.push(executable);
+        }
+        assert!(expected.windows(2).all(|paths| {
+            paths[0] != paths[1] && paths[0].to_string_lossy() == paths[1].to_string_lossy()
+        }));
+        let mut config = crate::config::AppConfig::default();
+        config.search.backend = crate::config::SearchBackend::Filesystem;
+        config.search.roots = Some(vec![root.0.clone()]);
+        config.search.use_platform_excludes = false;
+        let mut actual = Vec::new();
+        super::core_search(&config, |info| {
+            let path: &Path = info.file.as_ref();
+            actual.push(path.to_path_buf());
+        })
+        .unwrap();
+        expected.sort();
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
 
     fn scan_fixture(magic: [u8; 4], signature: &[u8]) -> Option<AppKind> {
         let sequence = NEXT_BINARY.fetch_add(1, Ordering::Relaxed);
