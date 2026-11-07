@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,7 +45,11 @@ fn fs_metadata_is_executable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-fn get_command_output(cmd: &str, args: &[&str], config: &PackageQueryConfig) -> Option<String> {
+fn get_command_output(
+    cmd: &str,
+    args: &[impl AsRef<OsStr>],
+    config: &PackageQueryConfig,
+) -> Option<String> {
     let output = crate::command::output(
         Command::new(cmd).args(args),
         config.timeout_ms,
@@ -81,33 +86,46 @@ fn collect_files_recursive(dirs: &[PathBuf], files: &mut Vec<PathBuf>) {
 
 // Traditional package managers (pacman, dpkg, rpm, portage)
 
-fn query_pacman(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
-    let pkg = get_command_output("pacman", &["-Qoq", exe_path], config)?;
+fn query_pacman(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+    let pkg = get_command_output(
+        "pacman",
+        &[OsStr::new("-Qoq"), exe_path.as_os_str()],
+        config,
+    )?;
     let files = get_command_output("pacman", &["-Qlq", &pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
-fn query_dpkg(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
-    let output = get_command_output("dpkg-query", &["-S", exe_path], config)?;
+fn query_dpkg(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+    let output = get_command_output(
+        "dpkg-query",
+        &[OsStr::new("-S"), exe_path.as_os_str()],
+        config,
+    )?;
     // Output format: "pkgname: /path/to/file" or "pkgname:arch: /path/to/file"
     let pkg = output.split(':').next()?.trim();
     let files = get_command_output("dpkg-query", &["-L", pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
-fn query_rpm(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+fn query_rpm(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
     // This covers Fedora (dnf), RHEL, openSUSE (zypper)
     let pkg = get_command_output(
         "rpm",
-        &["-qf", exe_path, "--queryformat", "%{NAME}"],
+        &[
+            OsStr::new("-qf"),
+            exe_path.as_os_str(),
+            OsStr::new("--queryformat"),
+            OsStr::new("%{NAME}"),
+        ],
         config,
     )?;
     let files = get_command_output("rpm", &["-ql", &pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
 
-fn query_portage(exe_path: &str, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
-    let pkg = get_command_output("qfile", &["-qC", exe_path], config)?;
+fn query_portage(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
+    let pkg = get_command_output("qfile", &[OsStr::new("-qC"), exe_path.as_os_str()], config)?;
     let files = get_command_output("qlist", &[&pkg], config)?;
     Some(files.lines().map(PathBuf::from).collect())
 }
@@ -255,12 +273,11 @@ fn query_traditional_package_manager(
     if !is_system_package_path(exe_path) {
         return None;
     }
-    let path = exe_path.to_string_lossy();
     match *TRADITIONAL_PACKAGE_MANAGER {
-        Some(TraditionalPackageManager::Pacman) => query_pacman(&path, config),
-        Some(TraditionalPackageManager::Dpkg) => query_dpkg(&path, config),
-        Some(TraditionalPackageManager::Rpm) => query_rpm(&path, config),
-        Some(TraditionalPackageManager::Portage) => query_portage(&path, config),
+        Some(TraditionalPackageManager::Pacman) => query_pacman(exe_path, config),
+        Some(TraditionalPackageManager::Dpkg) => query_dpkg(exe_path, config),
+        Some(TraditionalPackageManager::Rpm) => query_rpm(exe_path, config),
+        Some(TraditionalPackageManager::Portage) => query_portage(exe_path, config),
         None => None,
     }
 }
@@ -378,6 +395,156 @@ mod tests {
     use std::path::Path;
 
     use super::{PackageQueryConfig, get_command_output, is_system_package_path, select_icon};
+
+    #[test]
+    fn traditional_queries_preserve_native_path_arguments() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        const CHILD_PATH: &str = "CEFDETECTOR_TEST_PACKAGE_PATH";
+        const ICON_PATH: &str = "CEFDETECTOR_TEST_PACKAGE_ICON";
+        const TRACE_PATH: &str = "CEFDETECTOR_TEST_PACKAGE_TRACE";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let icon = PathBuf::from(std::env::var_os(ICON_PATH).unwrap());
+            let config = PackageQueryConfig {
+                timeout_ms: 2000,
+                max_output_bytes: 65536,
+            };
+            assert_eq!(
+                super::find_icon_via_package_manager(Path::new(&path), &config),
+                Some(icon)
+            );
+            return;
+        }
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-package-native-{}", std::process::id())),
+        );
+        fs::create_dir(&root.0).unwrap();
+        let icon = root.0.join("share/icons/256x256/apps/native.png");
+        fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        fs::write(&icon, include_bytes!("../icons/32x32.png")).unwrap();
+        let script = r#"#!/bin/sh
+case "$0" in
+  */pacman) program=pacman ;;
+  */dpkg-query) program=dpkg-query ;;
+  */rpm) program=rpm ;;
+  */qfile) program=qfile ;;
+  */qlist) program=qlist ;;
+  *) exit 10 ;;
+esac
+printf '%s\000' "$program" "$@" >> "$CEFDETECTOR_TEST_PACKAGE_TRACE"
+case "$program:$1" in
+  pacman:-Qoq|dpkg-query:-S|rpm:-qf|qfile:-qC)
+    [ "$2" = "$CEFDETECTOR_TEST_PACKAGE_PATH" ] || exit 9
+    if [ "$program" = dpkg-query ]; then
+      printf '  native-package: ignored-path  \n'
+    else
+      printf '  native-package  \n'
+    fi
+    ;;
+  pacman:-Qlq|dpkg-query:-L|rpm:-ql|qlist:native-package)
+    printf '%s\n' "$CEFDETECTOR_TEST_PACKAGE_ICON"
+    ;;
+  *) exit 10 ;;
+esac
+"#;
+        let mut failures = Vec::new();
+        for manager in ["pacman", "dpkg-query", "rpm", "portage"] {
+            let bin = root.0.join(manager);
+            fs::create_dir(&bin).unwrap();
+            let commands = if manager == "portage" {
+                vec!["qfile", "qlist"]
+            } else {
+                vec![manager]
+            };
+            for command in commands {
+                let path = bin.join(command);
+                fs::write(&path, script).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            for (index, name) in [
+                OsString::from_vec(b"app-\xff".to_vec()),
+                OsString::from_vec(b"app-\xfe".to_vec()),
+                OsString::from("中文 app '\"$\n"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // This path is only an argument to the mocks; nothing is written under /opt.
+                let path = Path::new("/opt/CefDetector native test").join(name);
+                let trace = root.0.join(format!("{manager}-{index}.trace"));
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "package_manager::tests::traditional_queries_preserve_native_path_arguments",
+                    ])
+                    .env("PATH", &bin)
+                    .env(CHILD_PATH, &path)
+                    .env(ICON_PATH, &icon)
+                    .env(TRACE_PATH, &trace)
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    failures.push(format!(
+                        "{manager}/{index}:\n{}{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                    continue;
+                }
+                let path = path.as_os_str().as_bytes();
+                let expected: Vec<&[u8]> = match manager {
+                    "pacman" => vec![
+                        b"pacman",
+                        b"-Qoq",
+                        path,
+                        b"pacman",
+                        b"-Qlq",
+                        b"native-package",
+                    ],
+                    "dpkg-query" => vec![
+                        b"dpkg-query",
+                        b"-S",
+                        path,
+                        b"dpkg-query",
+                        b"-L",
+                        b"native-package",
+                    ],
+                    "rpm" => vec![
+                        b"rpm",
+                        b"-qf",
+                        path,
+                        b"--queryformat",
+                        b"%{NAME}",
+                        b"rpm",
+                        b"-ql",
+                        b"native-package",
+                    ],
+                    "portage" => vec![b"qfile", b"-qC", path, b"qlist", b"native-package"],
+                    _ => unreachable!(),
+                };
+                let bytes = fs::read(trace).unwrap();
+                let actual: Vec<_> = bytes
+                    .strip_suffix(b"\0")
+                    .unwrap()
+                    .split(|byte| *byte == 0)
+                    .collect();
+                assert_eq!(actual, expected, "{manager}/{index}");
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     #[test]
     fn command_output_preserves_trimming_and_failure_semantics() {
