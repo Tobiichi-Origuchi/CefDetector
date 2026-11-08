@@ -907,6 +907,18 @@ mod tests {
         expected.sort();
         actual.sort();
         assert_eq!(actual, expected);
+
+        config.search.exclude_directory_names = vec!["�".into()];
+        actual.clear();
+        super::core_search(&config, |info| {
+            let path: &Path = info.file.as_ref();
+            actual.push(path.to_path_buf());
+        })
+        .unwrap();
+        expected.retain(|path| path.to_str().is_none());
+        assert_eq!(expected.len(), 2);
+        actual.sort();
+        assert_eq!(actual, expected);
     }
 
     fn scan_fixture(magic: [u8; 4], signature: &[u8]) -> Option<AppKind> {

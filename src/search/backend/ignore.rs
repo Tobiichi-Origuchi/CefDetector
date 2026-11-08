@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 #[cfg(target_os = "windows")]
@@ -17,7 +18,7 @@ pub(super) struct IgnoreCandidateSource;
 #[derive(Clone, Default)]
 pub(in crate::search) struct CandidateFilter {
     roots: Option<Vec<PathBuf>>,
-    dir_names: HashSet<String>,
+    dir_names: HashSet<OsString>,
     abs_paths: HashSet<PathBuf>,
     use_platform_excludes: bool,
     include_trash: bool,
@@ -52,7 +53,11 @@ impl CandidateFilter {
     pub(in crate::search) fn load(config: &SearchConfig) -> Self {
         Self {
             roots: config.roots.clone(),
-            dir_names: config.exclude_directory_names.iter().cloned().collect(),
+            dir_names: config
+                .exclude_directory_names
+                .iter()
+                .map(|name| OsString::from(name.as_str()))
+                .collect(),
             abs_paths: config.exclude_paths.iter().cloned().collect(),
             use_platform_excludes: config.use_platform_excludes,
             include_trash: config.include_trash,
@@ -181,12 +186,11 @@ fn path_has_prefix(path: &std::path::Path, root: &std::path::Path) -> bool {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn directory_name_is_ignored(config: &CandidateFilter, name: &std::ffi::OsStr) -> bool {
-    config.dir_names.contains(name.to_string_lossy().as_ref())
+    config.dir_names.contains(name)
 }
 
 #[cfg(target_os = "windows")]
 fn directory_name_is_ignored(config: &CandidateFilter, name: &std::ffi::OsStr) -> bool {
-    let name = name.to_string_lossy();
     config
         .dir_names
         .iter()
@@ -304,6 +308,51 @@ mod tests {
     use super::{path_starts_with_ignore_ascii_case, windows_exclusion_roots};
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn directory_exclusions_preserve_native_names() {
+        use std::ffi::OsString;
+
+        #[cfg(unix)]
+        let root = PathBuf::from("/scope");
+        #[cfg(windows)]
+        let root = PathBuf::from(r"C:\scope");
+        // These are in-memory paths; no invalid filename is created on APFS.
+        #[cfg(unix)]
+        let native_names = {
+            use std::os::unix::ffi::OsStringExt as _;
+            [
+                OsString::from_vec(vec![0xff]),
+                OsString::from_vec(vec![0xfe]),
+            ]
+        };
+        #[cfg(windows)]
+        let native_names = {
+            use std::os::windows::ffi::OsStringExt as _;
+            [
+                OsString::from_wide(&[0xd800]),
+                OsString::from_wide(&[0xdc00]),
+            ]
+        };
+        let config = crate::config::SearchConfig {
+            roots: Some(vec![root.clone()]),
+            exclude_directory_names: vec!["�".into(), "cache".into()],
+            use_platform_excludes: false,
+            ..Default::default()
+        };
+        let filter = super::CandidateFilter::load(&config);
+        for name in native_names {
+            assert!(filter.allows(&root.join(name).join("libcef.dll")));
+        }
+        assert!(!filter.allows(&root.join("�").join("libcef.dll")));
+        assert!(!filter.allows(&root.join("cache").join("libcef.dll")));
+        assert!(filter.allows(&root.join("cache-extra").join("libcef.dll")));
+        #[cfg(unix)]
+        assert!(filter.allows(&root.join("CACHE").join("libcef.dll")));
+        #[cfg(windows)]
+        assert!(!filter.allows(&root.join("CACHE").join("libcef.dll")));
+    }
 
     #[test]
     fn windows_drive_mask_maps_to_root_paths() {
