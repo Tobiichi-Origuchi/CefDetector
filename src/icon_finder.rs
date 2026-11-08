@@ -133,14 +133,20 @@ pub fn find_icon_in_theme(icon_name: &str, config: &IconConfig) -> Option<PathBu
         "/usr/share/icons/Adwaita/scalable/apps",
     ];
 
-    let home_dirs: Option<[String; 5]> = std::env::var("HOME").ok().map(|h| {
+    let home_dirs: Option<[PathBuf; 5]> = std::env::var_os("HOME").map(|home| {
         [
-            format!("{}/.local/share/icons/hicolor/512x512/apps", h),
-            format!("{}/.local/share/icons/hicolor/256x256/apps", h),
-            format!("{}/.local/share/icons/hicolor/128x128/apps", h),
-            format!("{}/.local/share/icons/hicolor/scalable/apps", h),
-            format!("{}/.local/share/icons", h),
+            "/.local/share/icons/hicolor/512x512/apps",
+            "/.local/share/icons/hicolor/256x256/apps",
+            "/.local/share/icons/hicolor/128x128/apps",
+            "/.local/share/icons/hicolor/scalable/apps",
+            "/.local/share/icons",
         ]
+        .map(|suffix| {
+            // Preserve the original empty-HOME and trailing-separator behavior.
+            let mut directory = home.clone();
+            directory.push(suffix);
+            PathBuf::from(directory)
+        })
     });
 
     let result = {
@@ -163,7 +169,7 @@ pub fn find_icon_in_theme(icon_name: &str, config: &IconConfig) -> Option<PathBu
                 && let Some(ref dirs) = home_dirs
             {
                 for dir in dirs {
-                    let p = Path::new(dir).join(format!("{}.{}", icon_name, ext));
+                    let p = dir.join(format!("{}.{}", icon_name, ext));
                     if p.exists() {
                         found = Some(p);
                         break;
@@ -1308,6 +1314,127 @@ mod tests {
         RawIcon, clear_icon_caches, configured_fallback_icon, desktop_exec_tokens, executable_name,
         find_neighboring_icon, find_squashfs_offset, parse_desktop_entry,
     };
+
+    #[test]
+    fn theme_icons_preserve_native_home_paths() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        const CHILD_HOME: &str = "CEFDETECTOR_TEST_THEME_NATIVE_HOME";
+        if let Some(home_path) = std::env::var_os(CHILD_HOME) {
+            let home_path = PathBuf::from(home_path);
+            let dirs = [
+                ".local/share/icons/hicolor/512x512/apps",
+                ".local/share/icons/hicolor/256x256/apps",
+                ".local/share/icons/hicolor/128x128/apps",
+                ".local/share/icons/hicolor/scalable/apps",
+                ".local/share/icons",
+            ]
+            .map(|suffix| home_path.join(suffix));
+            let prefix = format!("cefdetector-theme-test-{}", std::process::id());
+            let png = include_bytes!("../icons/32x32.png");
+            let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#;
+            let mut config = crate::config::IconConfig::default();
+            for (index, dir) in dirs.iter().enumerate() {
+                fs::create_dir_all(dir).unwrap();
+                let name = format!("{prefix}-directory-{index}");
+                let icon = dir.join(format!("{name}.png"));
+                fs::write(&icon, png).unwrap();
+                assert_eq!(super::find_icon_in_theme(&name, &config), Some(icon));
+            }
+            let name = format!("{prefix}-home-order");
+            for dir in &dirs {
+                fs::write(dir.join(format!("{name}.png")), png).unwrap();
+            }
+            assert_eq!(
+                super::find_icon_in_theme(&name, &config),
+                Some(dirs[0].join(format!("{name}.png")))
+            );
+            let configured = home_path.join("configured-theme");
+            fs::create_dir(&configured).unwrap();
+            config.linux.theme_directories.push(configured.clone());
+            let name = format!("{prefix}-configured");
+            for dir in [&configured, &dirs[0]] {
+                fs::write(dir.join(format!("{name}.png")), png).unwrap();
+            }
+            assert_eq!(
+                super::find_icon_in_theme(&name, &config),
+                Some(configured.join(format!("{name}.png")))
+            );
+            let name = format!("{prefix}-png-before-svg");
+            fs::write(configured.join(format!("{name}.svg")), svg).unwrap();
+            let icon = dirs[1].join(format!("{name}.png"));
+            fs::write(&icon, png).unwrap();
+            assert_eq!(super::find_icon_in_theme(&name, &config), Some(icon));
+            let name = format!("{prefix}-svg");
+            let icon = dirs[4].join(format!("{name}.svg"));
+            fs::write(&icon, svg).unwrap();
+            assert_eq!(super::find_icon_in_theme(&name, &config), Some(icon));
+
+            let name = format!("{prefix}-desktop");
+            fs::write(dirs[0].join(format!("{name}.png")), png).unwrap();
+            let content = format!("[Desktop Entry]\nExec={prefix}\nIcon={name}\n");
+            let (executables, icon) = parse_desktop_entry(&content).unwrap();
+            *super::DESKTOP_INDEX.lock().unwrap() = Some(
+                executables
+                    .into_iter()
+                    .map(|exe| (exe, icon.clone()))
+                    .collect(),
+            );
+            config.sources = vec![
+                crate::config::IconSource::Desktop,
+                crate::config::IconSource::Builtin,
+            ];
+            let executable = home_path.join(&prefix);
+            fs::write(&executable, []).unwrap();
+            let RawIcon::PngOrIco(bytes) = super::get_app_icon(&executable, &config) else {
+                panic!("native HOME lost its desktop theme icon");
+            };
+            assert_eq!(&*bytes, png);
+            return;
+        }
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-theme-native-{}", std::process::id())),
+        );
+        fs::create_dir(&root.0).unwrap();
+        let mut failures = Vec::new();
+        for name in [
+            OsString::from_vec(b"home-\xff".to_vec()),
+            OsString::from_vec(b"home-\xfe".to_vec()),
+            OsString::from("home-�"),
+            OsString::from("home-中文"),
+        ] {
+            let home_path = root.0.join(&name);
+            fs::create_dir(&home_path).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "icon_finder::tests::theme_icons_preserve_native_home_paths",
+                ])
+                .env(CHILD_HOME, &home_path)
+                .env("HOME", &home_path)
+                .output()
+                .unwrap();
+            if !output.status.success() {
+                failures.push(format!(
+                    "{name:?}:\n{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     #[test]
     fn desktop_search_directories_preserve_native_environment_paths() {
