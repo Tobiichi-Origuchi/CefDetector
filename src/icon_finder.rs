@@ -260,22 +260,21 @@ pub fn find_icon_via_desktop_file(exe_path: &Path, config: &IconConfig) -> Optio
 #[cfg(target_os = "linux")]
 fn desktop_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
         dirs.push(PathBuf::from(data_home).join("applications"));
-    } else if let Ok(home) = std::env::var("HOME") {
+    } else if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(&home).join(".local/share/applications"));
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/flatpak/exports/share/applications"));
     }
 
     let data_dirs =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+        std::env::var_os("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
     dirs.extend(
-        data_dirs
-            .split(':')
-            .filter(|dir| !dir.is_empty())
-            .map(|dir| Path::new(dir).join("applications")),
+        std::env::split_paths(&data_dirs)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.join("applications")),
     );
     dirs.push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
     dirs.push(PathBuf::from("/var/lib/snapd/desktop/applications"));
@@ -1309,6 +1308,172 @@ mod tests {
         RawIcon, clear_icon_caches, configured_fallback_icon, desktop_exec_tokens, executable_name,
         find_neighboring_icon, find_squashfs_offset, parse_desktop_entry,
     };
+
+    #[test]
+    fn desktop_search_directories_preserve_native_environment_paths() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        const EXPECTED_FILE: &str = "CEFDETECTOR_TEST_DESKTOP_DIRS_EXPECTED";
+        if let Some(expected_file) = std::env::var_os(EXPECTED_FILE) {
+            let expected_file = PathBuf::from(expected_file);
+            let bytes = fs::read(&expected_file).unwrap();
+            let expected: Vec<_> = bytes
+                .strip_suffix(b"\0")
+                .unwrap()
+                .split(|byte| *byte == 0)
+                .map(|bytes| PathBuf::from(OsString::from_vec(bytes.to_vec())))
+                .collect();
+            assert_eq!(super::desktop_search_dirs(), expected);
+            for directory in expected
+                .iter()
+                .filter(|dir| dir.starts_with(expected_file.parent().unwrap()))
+            {
+                assert!(directory.join("native.desktop").is_file());
+            }
+            return;
+        }
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-desktop-dirs-{}", std::process::id())),
+        );
+        fs::create_dir(&root.0).unwrap();
+        let native_home = root.0.join(OsString::from_vec(b"home-\xff".to_vec()));
+        let native_data_home = root.0.join(OsString::from_vec(b"data-\xfe".to_vec()));
+        let native_global = root.0.join(OsString::from_vec(b"global-\xff".to_vec()));
+        let other_native_global = root.0.join(OsString::from_vec(b"global-\xfe".to_vec()));
+        let home_path = root.0.join("home-中文");
+        let data_home_path = root.0.join("data-中文");
+        let global_path = root.0.join("global with space \"quote\"");
+        let mut native_dirs = OsString::from(":");
+        native_dirs.push(&native_global);
+        native_dirs.push("::");
+        native_dirs.push(&other_native_global);
+        native_dirs.push(":");
+        native_dirs.push(&global_path);
+        native_dirs.push(":");
+        native_dirs.push(&native_global);
+        native_dirs.push(":");
+        let mut unicode_dirs = OsString::from(":");
+        unicode_dirs.push(&data_home_path);
+        unicode_dirs.push("::");
+        unicode_dirs.push(&global_path);
+        unicode_dirs.push(":");
+        unicode_dirs.push(&data_home_path);
+        unicode_dirs.push(":");
+        let flatpak_apps = ".local/share/flatpak/exports/share/applications";
+        let cases = [
+            (
+                "home-native",
+                Some(native_home.clone().into_os_string()),
+                None,
+                Some(global_path.clone().into_os_string()),
+                vec![
+                    native_home.join(".local/share/applications"),
+                    native_home.join(flatpak_apps),
+                    global_path.join("applications"),
+                ],
+            ),
+            (
+                "data-home-native",
+                Some(home_path.clone().into_os_string()),
+                Some(native_data_home.clone().into_os_string()),
+                Some(global_path.clone().into_os_string()),
+                vec![
+                    native_data_home.join("applications"),
+                    home_path.join(flatpak_apps),
+                    global_path.join("applications"),
+                ],
+            ),
+            (
+                "data-dirs-native",
+                None,
+                None,
+                Some(native_dirs),
+                vec![
+                    native_global.join("applications"),
+                    other_native_global.join("applications"),
+                    global_path.join("applications"),
+                ],
+            ),
+            (
+                "unicode",
+                Some(home_path.clone().into_os_string()),
+                Some(data_home_path.clone().into_os_string()),
+                Some(unicode_dirs),
+                vec![
+                    data_home_path.join("applications"),
+                    home_path.join(flatpak_apps),
+                    global_path.join("applications"),
+                ],
+            ),
+            (
+                "unset",
+                None,
+                None,
+                None,
+                vec![
+                    PathBuf::from("/usr/local/share/applications"),
+                    PathBuf::from("/usr/share/applications"),
+                ],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (label, home_value, data_home_value, data_dirs_value, mut expected) in cases {
+            expected.extend([
+                PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+                PathBuf::from("/var/lib/snapd/desktop/applications"),
+            ]);
+            let mut bytes = Vec::new();
+            for directory in &expected {
+                if directory.starts_with(&root.0) {
+                    fs::create_dir_all(directory).unwrap();
+                    fs::write(
+                        directory.join("native.desktop"),
+                        "[Desktop Entry]\nExec=native-path-fixture\nIcon=fixture\n",
+                    )
+                    .unwrap();
+                }
+                bytes.extend_from_slice(directory.as_os_str().as_bytes());
+                bytes.push(0);
+            }
+            let expected_file = root.0.join(format!("{label}.expected"));
+            fs::write(&expected_file, bytes).unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "icon_finder::tests::desktop_search_directories_preserve_native_environment_paths",
+            ]).env(EXPECTED_FILE, &expected_file);
+            for (key, value) in [
+                ("HOME", home_value),
+                ("XDG_DATA_HOME", data_home_value),
+                ("XDG_DATA_DIRS", data_dirs_value),
+            ] {
+                command.env_remove(key);
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            let output = command.output().unwrap();
+            if !output.status.success() {
+                failures.push(format!(
+                    "{label}:\n{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     #[test]
     fn desktop_lookup_distinguishes_native_names_from_replacement_characters() {
