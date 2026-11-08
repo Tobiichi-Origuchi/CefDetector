@@ -311,13 +311,13 @@ fn select_icon(files: Vec<PathBuf>) -> Option<PathBuf> {
             if !file.is_file() {
                 continue;
             }
-            let file_name = file.file_name().unwrap_or_default().to_string_lossy();
-            let is_image = file_name.ends_with(".png")
-                || file_name.ends_with(".svg")
-                || file_name.ends_with(".xpm");
+            let file_name = file.file_name().unwrap_or_default();
+            let bytes = file_name.as_bytes();
+            let is_image =
+                bytes.ends_with(b".png") || bytes.ends_with(b".svg") || bytes.ends_with(b".xpm");
             if is_image {
-                let file_stem = file.file_stem().unwrap_or_default().to_string_lossy();
-                if file_stem == name || file_name == name {
+                let file_stem = file.file_stem().unwrap_or_default();
+                if file_stem == name.as_str() || file_name == name.as_str() {
                     return Some(file.clone());
                 }
             }
@@ -400,6 +400,71 @@ mod tests {
     use std::path::Path;
 
     use super::{PackageQueryConfig, get_command_output, is_system_package_path, select_icon};
+
+    #[test]
+    fn package_icon_names_do_not_match_lossy_native_names() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::path::PathBuf;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(std::env::temp_dir().join(format!(
+            "cefdetector-icon-association-{}",
+            std::process::id()
+        )));
+        fs::create_dir(&root.0).unwrap();
+        let png = include_bytes!("../icons/32x32.png");
+        for (index, (name, filename)) in [
+            ("�", "�.png"),
+            ("�.png", "�.png"),
+            ("中文", "中文.png"),
+            ("Case", "Case.png"),
+            (".png", ".png"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = root.0.join(index.to_string());
+            let assets = directory.join("assets");
+            fs::create_dir_all(&assets).unwrap();
+            let desktop = directory.join("app.desktop");
+            fs::write(&desktop, format!("[Desktop Entry]\nIcon={name}\n")).unwrap();
+            let native_ff = assets.join(OsString::from_vec(b"\xff.png".to_vec()));
+            let native_fe = assets.join(OsString::from_vec(b"\xfe.png".to_vec()));
+            let lowercase = assets.join("case.png");
+            let expected = assets.join(filename);
+            for path in [&native_ff, &native_fe, &lowercase, &expected] {
+                fs::write(path, png).unwrap();
+            }
+            assert_eq!(
+                select_icon(vec![
+                    desktop,
+                    native_ff,
+                    native_fe,
+                    lowercase,
+                    expected.clone()
+                ]),
+                Some(expected),
+                "Icon={name}"
+            );
+        }
+
+        let desktop = root.0.join("fallback.desktop");
+        fs::write(&desktop, "[Desktop Entry]\nIcon=unmatched-name\n").unwrap();
+        let fallback = root
+            .0
+            .join("share/icons/32x32/apps")
+            .join(OsString::from_vec(b"\xff.png".to_vec()));
+        fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        fs::write(&fallback, png).unwrap();
+        assert_eq!(select_icon(vec![desktop, fallback.clone()]), Some(fallback));
+    }
 
     #[test]
     fn brew_queries_preserve_native_installation_prefixes() {
