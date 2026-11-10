@@ -46,11 +46,11 @@ fn fs_metadata_is_executable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
-fn get_command_output(
+fn get_command_stdout(
     cmd: &str,
     args: &[impl AsRef<OsStr>],
     config: &PackageQueryConfig,
-) -> Option<String> {
+) -> Option<Vec<u8>> {
     let output = crate::command::output(
         Command::new(cmd).args(args),
         config.timeout_ms,
@@ -58,10 +58,35 @@ fn get_command_output(
     )
     .ok()?;
     if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Some(output.stdout)
     } else {
         None
     }
+}
+
+fn get_command_output(
+    cmd: &str,
+    args: &[impl AsRef<OsStr>],
+    config: &PackageQueryConfig,
+) -> Option<String> {
+    let stdout = get_command_stdout(cmd, args, config)?;
+    Some(String::from_utf8_lossy(&stdout).trim().to_string())
+}
+
+fn get_command_file_list(
+    cmd: &str,
+    args: &[impl AsRef<OsStr>],
+    config: &PackageQueryConfig,
+) -> Option<Vec<PathBuf>> {
+    let files = get_command_stdout(cmd, args, config)?;
+    // Paths in these file lists are raw bytes followed by LF, without escaping or trimming.
+    Some(
+        files
+            .split(|byte| *byte == b'\n')
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(OsStr::from_bytes(path)))
+            .collect(),
+    )
 }
 
 fn collect_files_recursive(dirs: &[PathBuf], files: &mut Vec<PathBuf>) {
@@ -93,8 +118,7 @@ fn query_pacman(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<Path
         &[OsStr::new("-Qoq"), exe_path.as_os_str()],
         config,
     )?;
-    let files = get_command_output("pacman", &["-Qlq", &pkg], config)?;
-    Some(files.lines().map(PathBuf::from).collect())
+    get_command_file_list("pacman", &["-Qlq", &pkg], config)
 }
 
 fn query_dpkg(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
@@ -105,8 +129,7 @@ fn query_dpkg(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBu
     )?;
     // Output format: "pkgname: /path/to/file" or "pkgname:arch: /path/to/file"
     let pkg = output.split(':').next()?.trim();
-    let files = get_command_output("dpkg-query", &["-L", pkg], config)?;
-    Some(files.lines().map(PathBuf::from).collect())
+    get_command_file_list("dpkg-query", &["-L", pkg], config)
 }
 
 fn query_rpm(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
@@ -121,14 +144,12 @@ fn query_rpm(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf
         ],
         config,
     )?;
-    let files = get_command_output("rpm", &["-ql", &pkg], config)?;
-    Some(files.lines().map(PathBuf::from).collect())
+    get_command_file_list("rpm", &["-ql", &pkg], config)
 }
 
 fn query_portage(exe_path: &Path, config: &PackageQueryConfig) -> Option<Vec<PathBuf>> {
     let pkg = get_command_output("qfile", &[OsStr::new("-qC"), exe_path.as_os_str()], config)?;
-    let files = get_command_output("qlist", &[&pkg], config)?;
-    Some(files.lines().map(PathBuf::from).collect())
+    get_command_file_list("qlist", &[&pkg], config)
 }
 
 // Path-based package managers (snap, flatpak, nix, brew)
@@ -400,6 +421,143 @@ mod tests {
     use std::path::Path;
 
     use super::{PackageQueryConfig, get_command_output, is_system_package_path, select_icon};
+
+    #[test]
+    fn package_file_lists_preserve_native_paths() {
+        use std::ffi::OsString;
+        use std::fs;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        use crate::config::{IconConfig, IconSource};
+        use crate::icon_finder::{RawIcon, get_app_icon};
+
+        const ICON_PATH: &str = "CEFDETECTOR_TEST_PACKAGE_FILE_ICON";
+        const MANAGER: &str = "CEFDETECTOR_TEST_FILE_LIST_MANAGER";
+        let png = include_bytes!("../icons/32x32.png");
+        if let Some(icon) = std::env::var_os(ICON_PATH) {
+            let icon = PathBuf::from(icon);
+            let executable = Path::new("/opt/CefDetector package output test/app");
+            let mut config = IconConfig {
+                sources: vec![IconSource::PackageManager, IconSource::Builtin],
+                ..IconConfig::default()
+            };
+            config.linux.package_query.timeout_ms = 2000;
+            config.linux.package_query.max_output_bytes = 65536;
+            let files = match std::env::var(MANAGER).unwrap().as_str() {
+                "pacman" => super::query_pacman(executable, &config.linux.package_query),
+                "dpkg-query" => super::query_dpkg(executable, &config.linux.package_query),
+                "rpm" => super::query_rpm(executable, &config.linux.package_query),
+                "portage" => super::query_portage(executable, &config.linux.package_query),
+                _ => unreachable!(),
+            };
+            let selected =
+                super::find_icon_via_package_manager(executable, &config.linux.package_query);
+            let raw = get_app_icon(executable, &config);
+            assert_eq!(files, Some(vec![icon.clone()]));
+            let RawIcon::PngOrIco(bytes) = raw else {
+                panic!("expected a PNG or the built-in ICO");
+            };
+            if icon.extension().is_some_and(|extension| extension == "png") {
+                assert_eq!(selected, Some(icon));
+                assert_eq!(bytes.as_ref(), png);
+            } else {
+                // Whitespace is part of the filename; it must not turn into a .png match.
+                assert_eq!(selected, None);
+                assert_eq!(
+                    bytes.as_ref(),
+                    include_bytes!("../icons/default_cef_icon.ico")
+                );
+            }
+            return;
+        }
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-package-output-{}", std::process::id())),
+        );
+        for manager in ["pacman", "dpkg-query", "rpm", "portage"] {
+            let bin = root.0.join(manager);
+            fs::create_dir_all(&bin).unwrap();
+            let commands = if manager == "portage" {
+                vec!["qfile", "qlist"]
+            } else {
+                vec![manager]
+            };
+            for command in commands {
+                let command = bin.join(command);
+                fs::write(
+                    &command,
+                    r#"#!/bin/sh
+case "$1" in
+  -Qoq|-qf|-qC) printf 'native-package\n' ;;
+  -S) printf 'native-package:amd64: ignored-path\n' ;;
+  -Qlq|-L|-ql)
+    [ "$2" = native-package ] || exit 9
+    printf '%s\n' "$CEFDETECTOR_TEST_PACKAGE_FILE_ICON"
+    ;;
+  native-package) printf '%s\n' "$CEFDETECTOR_TEST_PACKAGE_FILE_ICON" ;;
+  *) exit 10 ;;
+esac
+"#,
+                )
+                .unwrap();
+                fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let mut failures = Vec::new();
+        for (index, (name, filename)) in [
+            (OsString::from_vec(b"app-\xff".to_vec()), "native.png"),
+            (OsString::from_vec(b"app-\xfe".to_vec()), "native.png"),
+            (OsString::from("app-�"), "native.png"),
+            (OsString::from("中文 app '\"$"), "native.png"),
+            (OsString::from("space"), "native.png "),
+            (OsString::from("tab"), "native.png\t"),
+            (OsString::from("cr"), "native.png\r"),
+            (OsString::from("nbsp"), "native.png\u{a0}"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = root.0.join(index.to_string()).join(name);
+            let icon = directory.join("share/icons/32x32/apps").join(filename);
+            fs::create_dir_all(icon.parent().unwrap()).unwrap();
+            fs::write(&icon, png).unwrap();
+            let lossy = PathBuf::from(icon.to_string_lossy().trim());
+            if lossy != icon {
+                fs::create_dir_all(lossy.parent().unwrap()).unwrap();
+                fs::write(&lossy, include_bytes!("../icons/128x128.png")).unwrap();
+            }
+            for manager in ["pacman", "dpkg-query", "rpm", "portage"] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "package_manager::tests::package_file_lists_preserve_native_paths",
+                    ])
+                    .env("PATH", root.0.join(manager))
+                    .env(ICON_PATH, &icon)
+                    .env(MANAGER, manager)
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    failures.push(format!(
+                        "{manager}/case {index}:\n{}{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     #[test]
     fn package_icon_names_do_not_match_lossy_native_names() {
