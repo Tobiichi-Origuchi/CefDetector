@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(target_os = "windows")]
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -265,8 +267,7 @@ fn get_running_processes() -> HashSet<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn get_running_processes() -> HashSet<String> {
-    use std::ffi::OsString;
+fn get_running_processes() -> HashSet<OsString> {
     use std::mem::size_of;
     use std::os::windows::ffi::OsStringExt as _;
 
@@ -336,18 +337,58 @@ fn get_running_processes() -> HashSet<String> {
     processes
 }
 
-#[cfg(target_os = "windows")]
-fn normalize_windows_path(path: &Path) -> String {
-    let path = path.to_string_lossy().replace('/', "\\");
-    let path = if path
-        .get(.."\\\\?\\UNC\\".len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
-    {
-        format!(r"\\{}", &path[r"\\?\UNC\".len()..])
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_path_units(path: impl Iterator<Item = u16>) -> Vec<u16> {
+    let path: Vec<_> = path
+        .map(|unit| {
+            if unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                unit
+            }
+        })
+        .collect();
+    let mut normalized = Vec::with_capacity(path.len());
+    let unc_prefix = br"\\?\UNC\";
+    let long_prefix = br"\\?\".map(u16::from);
+    let path = if path.get(..unc_prefix.len()).is_some_and(|prefix| {
+        prefix
+            .iter()
+            .zip(unc_prefix)
+            .all(|(&unit, expected)| unit < 128 && (unit as u8).eq_ignore_ascii_case(expected))
+    }) {
+        normalized.extend(r"\\".encode_utf16());
+        &path[unc_prefix.len()..]
+    } else if path.starts_with(&long_prefix) {
+        &path[long_prefix.len()..]
     } else {
-        path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()
+        &path
     };
-    path.to_lowercase()
+
+    // Lowercase complete valid runs to retain contextual mappings such as final sigma.
+    let mut valid = String::new();
+    for decoded in char::decode_utf16(path.iter().copied()) {
+        match decoded {
+            Ok(character) => valid.push(character),
+            Err(error) => {
+                normalized.extend(valid.to_lowercase().encode_utf16());
+                valid.clear();
+                // Keep each unpaired surrogate instead of substituting U+FFFD.
+                normalized.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    normalized.extend(valid.to_lowercase().encode_utf16());
+    normalized
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_path(path: &Path) -> OsString {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    OsString::from_wide(&normalize_windows_path_units(
+        path.as_os_str().encode_wide(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -363,7 +404,7 @@ fn process_is_running(processes: &HashSet<PathBuf>, path: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn process_is_running(processes: &HashSet<String>, path: &Path) -> bool {
+fn process_is_running(processes: &HashSet<OsString>, path: &Path) -> bool {
     processes.contains(&normalize_windows_path(path))
         || fs::canonicalize(path)
             .is_ok_and(|canonical| processes.contains(&normalize_windows_path(&canonical)))
@@ -1075,6 +1116,104 @@ mod tests {
             explorer_select_argument(path),
             r#"/select,"C:\Program Files (x86)\示例 应用\应用程序.exe""#
         );
+    }
+
+    #[test]
+    fn windows_path_normalization_preserves_native_units() {
+        use std::collections::HashSet;
+
+        for (prefix, expected_prefix) in [
+            (r"C:/Apps/", r"c:\apps\"),
+            (r"\\?\C:\Apps\", r"c:\apps\"),
+            (r"\\?\uNc\Server\Share\", r"\\server\share\"),
+            (r"\\Server\Share\", r"\\server\share\"),
+        ] {
+            let mut keys = HashSet::new();
+            for unit in [0xd800, 0xd801, 0xdc00, 0xdc01, 0xfffd] {
+                let mut path: Vec<_> = prefix.encode_utf16().collect();
+                path.push(unit);
+                path.extend(".EXE".encode_utf16());
+                let actual = super::normalize_windows_path_units(path.into_iter());
+                let mut expected: Vec<_> = expected_prefix.encode_utf16().collect();
+                expected.push(unit);
+                expected.extend(".exe".encode_utf16());
+                assert_eq!(actual, expected);
+                keys.insert(actual);
+            }
+            assert_eq!(keys.len(), 5);
+        }
+
+        let mut path: Vec<_> = "C:/".encode_utf16().collect();
+        path.extend([0xd800, 0xd801, 0xdc00, 0xdc01]);
+        path.extend(".EXE".encode_utf16());
+        let mut expected: Vec<_> = r"c:\".encode_utf16().collect();
+        expected.extend([0xd800, 0xd801, 0xdc28, 0xdc01]);
+        expected.extend(".exe".encode_utf16());
+        assert_eq!(
+            super::normalize_windows_path_units(path.into_iter()),
+            expected
+        );
+    }
+
+    #[test]
+    fn windows_path_normalization_preserves_unicode_casing() {
+        for (path, expected) in [
+            ("", ""),
+            (r"\", r"\"),
+            (r"\\?", r"\\?"),
+            (r"\\?\", ""),
+            (r"\\?\UNC", "unc"),
+            (r"\\?\uNc\", r"\\"),
+            (r"//?/uNc/Server/Share/App.exe", r"\\server\share\app.exe"),
+            (r"\\?\ŕNC\SERVER\App.exe", r"ŕnc\server\app.exe"),
+            (r"C:\\Apps\.\App.exe", r"c:\\apps\.\app.exe"),
+            (r"\\?\UNC\Server\Share\ΟΣ.exe", r"\\server\share\οσ.exe"),
+            (r"C:\Σ.exe", r"c:\σ.exe"),
+            ("C:\\ΟΣ\u{301}.EXE", "c:\\οσ\u{301}.exe"),
+            ("C:\\ΟΣ\u{301}Α.exe", "c:\\οσ\u{301}α.exe"),
+            (r"C:\ΟΣ\App.exe", r"c:\ος\app.exe"),
+            ("C:\\ΟΣ\u{301}", "c:\\ος\u{301}"),
+            ("C:\\İ\\\u{10400}.EXE", "c:\\i\u{307}\\\u{10428}.exe"),
+        ] {
+            assert_eq!(
+                super::normalize_windows_path_units(path.encode_utf16()),
+                expected.encode_utf16().collect::<Vec<_>>(),
+                "{path:?}"
+            );
+        }
+
+        for unit in [0xd800, 0xd801, 0xdc00, 0xdc01] {
+            let mut path: Vec<_> = r"C:\AΣ".encode_utf16().collect();
+            path.push(unit);
+            path.extend("ΣB.EXE".encode_utf16());
+            let mut expected: Vec<_> = r"c:\aς".encode_utf16().collect();
+            expected.push(unit);
+            expected.extend("σb.exe".encode_utf16());
+            assert_eq!(
+                super::normalize_windows_path_units(path.into_iter()),
+                expected
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_process_path_keys_preserve_unpaired_surrogates() {
+        use std::collections::HashSet;
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt as _;
+        use std::path::Path;
+
+        let keys: HashSet<_> = [0xd800, 0xd801, 0xdc00, 0xdc01, 0xfffd]
+            .into_iter()
+            .map(|unit| {
+                let mut path: Vec<_> = r"C:\Apps\".encode_utf16().collect();
+                path.push(unit);
+                path.extend(".EXE".encode_utf16());
+                normalize_windows_path(Path::new(&OsString::from_wide(&path)))
+            })
+            .collect();
+        assert_eq!(keys.len(), 5);
     }
 
     #[cfg(target_os = "windows")]
