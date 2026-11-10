@@ -491,11 +491,7 @@ fn executable_score(path: &Path, directory: &Path) -> u8 {
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
-    let directory_name = directory
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_ascii_lowercase();
+    let directory_name = directory.file_name().unwrap_or_default();
     let extension = path
         .extension()
         .unwrap_or_default()
@@ -510,7 +506,7 @@ fn executable_score(path: &Path, directory: &Path) -> u8 {
     }
     if path
         .file_stem()
-        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case(&directory_name))
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(directory_name))
     {
         score += 20;
     }
@@ -858,6 +854,142 @@ mod tests {
     };
 
     static NEXT_BINARY: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn executable_name_scores_preserve_native_identity() {
+        use std::ffi::OsString;
+        use std::path::{Path, PathBuf};
+
+        // These names are only held in memory, so no invalid filenames are created on APFS.
+        #[cfg(unix)]
+        let names = {
+            use std::os::unix::ffi::OsStringExt as _;
+            [
+                OsString::from_vec(b"App-\xff".to_vec()),
+                OsString::from_vec(b"App-\xfe".to_vec()),
+                OsString::from("App-�"),
+            ]
+        };
+        #[cfg(windows)]
+        let names = {
+            use std::os::windows::ffi::OsStringExt as _;
+            let mut first: Vec<_> = "App-".encode_utf16().collect();
+            first.push(0xd800);
+            let mut second = first.clone();
+            *second.last_mut().unwrap() = 0xd801;
+            [
+                OsString::from_wide(&first),
+                OsString::from_wide(&second),
+                OsString::from("App-�"),
+            ]
+        };
+        assert!(names.windows(2).all(|pair| {
+            pair[0] != pair[1] && pair[0].to_string_lossy() == pair[1].to_string_lossy()
+        }));
+
+        let mut failures = Vec::new();
+        for (directory_index, directory_name) in names.iter().enumerate() {
+            let directory = PathBuf::from("applications").join(directory_name);
+            for (file_index, name) in names.iter().enumerate() {
+                for (suffix, base_score) in [("", 40), (".EXE", 50), (".AppImage", 50)] {
+                    let mut filename = name.clone();
+                    filename.push(suffix);
+                    let path = directory.join(filename);
+                    let expected = base_score + if directory_index == file_index { 20 } else { 0 };
+                    let actual = super::executable_score(&path, &directory);
+                    if actual != expected {
+                        failures.push(format!(
+                            "{directory_index}/{file_index}/{suffix:?}: expected {expected}, got {actual}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+        for (directory, filename, expected) in [
+            ("App", "aPP", 60),
+            ("App", "app.ExE", 70),
+            ("APP", "app.AppImage", 70),
+            ("Browser", "browser.EXE", 100),
+            ("App", "browser.exe", 80),
+            ("App", "app.txt", 30),
+            ("中文", "中文.exe", 70),
+            ("Éditeur", "Éditeur.exe", 70),
+            ("Éditeur", "éditeur.exe", 50),
+            ("Σ", "σ.exe", 50),
+        ] {
+            let directory = Path::new("applications").join(directory);
+            assert_eq!(
+                super::executable_score(&directory.join(filename), &directory),
+                expected,
+                "{filename}"
+            );
+        }
+    }
+
+    // APFS rejects the non-UTF-8 fixture names used by this test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_selection_distinguishes_lossy_native_names() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let sequence = NEXT_BINARY.fetch_add(1, Ordering::Relaxed);
+        let root = Fixture(std::env::temp_dir().join(format!(
+            "cefdetector-fallback-native-{}-{sequence}",
+            std::process::id()
+        )));
+        fs::create_dir(&root.0).unwrap();
+        let mut expected = Vec::new();
+        for (index, name) in [
+            OsString::from_vec(b"App-\xff".to_vec()),
+            OsString::from_vec(b"App-\xfe".to_vec()),
+            OsString::from("App-中文"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let directory = root.0.join(index.to_string()).join(&name);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("libcef.so"),
+                b"\x7fELFcef_string_utf8_to_utf16",
+            )
+            .unwrap();
+            let executable = directory.join(name);
+            let decoy = directory.join("App-�");
+            for path in [&executable, &decoy] {
+                fs::write(path, b"\x7fELF").unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            expected.push(executable);
+        }
+
+        let mut config = crate::config::AppConfig::default();
+        config.search.backend = crate::config::SearchBackend::Filesystem;
+        config.search.roots = Some(vec![root.0.clone()]);
+        config.search.use_platform_excludes = false;
+        let mut actual = Vec::new();
+        super::core_search(&config, |info| {
+            assert_eq!(info.app_type, "CEF");
+            assert!(!info.is_dir);
+            actual.push(info.file);
+        })
+        .unwrap();
+        expected.sort();
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
 
     // APFS rejects the non-UTF-8 fixture names used by this test.
     #[cfg(target_os = "linux")]
