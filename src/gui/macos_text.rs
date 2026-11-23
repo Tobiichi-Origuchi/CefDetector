@@ -355,11 +355,11 @@ fn render_text(
     drop(bitmap);
 
     // The bitmap stores premultiplied RGBA; egui expects unmultiplied sRGBA.
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as u32;
-        if alpha != 0 {
-            for channel in &mut pixel[..3] {
-                *channel = ((*channel as u32 * 255 + alpha / 2) / alpha).min(255) as u8;
+        for channel in &mut pixel[..3] {
+            if let Some(value) = (*channel as u32 * 255 + alpha / 2).checked_div(alpha) {
+                *channel = value.min(255) as u8;
             }
         }
     }

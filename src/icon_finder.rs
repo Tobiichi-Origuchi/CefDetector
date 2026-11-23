@@ -1804,7 +1804,7 @@ mod macos_tests {
     #[test]
     fn icns_is_decoded_to_png_for_the_existing_gui_pipeline() {
         let mut image = icns::Image::new(icns::PixelFormat::RGBA, 32, 32);
-        for pixel in image.data_mut().chunks_exact_mut(4) {
+        for pixel in image.data_mut().as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&[20, 100, 220, 255]);
         }
         let mut family = icns::IconFamily::new();

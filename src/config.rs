@@ -504,7 +504,7 @@ impl RgbaColor {
 
         let mut channels = [0_u8; 4];
         channels[3] = 255;
-        for (index, pair) in digits.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in digits.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let pair = std::str::from_utf8(pair)
                 .map_err(|_| ConfigError::new(format!("invalid color {value:?}")))?;
             channels[index] = u8::from_str_radix(pair, 16)
@@ -2442,7 +2442,7 @@ fn parse_override(input: &str) -> Result<toml::Value, ConfigError> {
             input,
             parse_assignment(input, 0, "")
                 .map(|(_, assignment)| assignment.key)
-                .or_else(|| Some(0..raw_path.len())),
+                .or(Some(0..raw_path.len())),
             "the key is not a valid unquoted dotted TOML key",
         ));
     }

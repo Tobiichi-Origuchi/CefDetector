@@ -426,7 +426,7 @@ impl Frontend {
             };
             let response = ui.interact(
                 card.intersect(viewport),
-                Id::new(("app-card", index)),
+                Id::unique(("app-card", index)),
                 sense,
             );
             if response.hovered() && card_config.click_action != ClickAction::None {
@@ -663,8 +663,9 @@ impl Frontend {
             vec2(track.width(), thumb_height),
         );
 
-        let track_response = ui.interact(track, Id::new("app-grid-scroll-track"), Sense::hover());
-        let thumb_response = ui.interact(thumb, Id::new("app-grid-scroll-thumb"), Sense::drag());
+        let track_response =
+            ui.interact(track, Id::unique("app-grid-scroll-track"), Sense::hover());
+        let thumb_response = ui.interact(thumb, Id::unique("app-grid-scroll-thumb"), Sense::drag());
 
         if track_response.hovered() || thumb_response.hovered() || thumb_response.dragged() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -720,7 +721,7 @@ impl Frontend {
         );
         let position = pos2(root.left() + footer.left, root.bottom() - footer.bottom);
         let link_rect = Rect::from_min_size(position, prepared_text_size(&measured_text));
-        let response = ui.interact(link_rect, Id::new("repository-link"), Sense::click());
+        let response = ui.interact(link_rect, Id::unique("repository-link"), Sense::click());
 
         if response.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -1435,8 +1436,10 @@ impl EguiRenderer {
         let shapes = std::mem::take(&mut self.shapes);
         let mut textures_delta = std::mem::take(&mut self.textures_delta);
 
-        for (id, image_delta) in textures_delta.set {
-            self.painter.set_texture(id, &image_delta);
+        for (id, image_deltas) in textures_delta.set.drain() {
+            for image_delta in image_deltas {
+                self.painter.set_texture(id, &image_delta);
+            }
         }
         let clipped_primitives = self.egui_ctx.tessellate(shapes, self.pixels_per_point);
         self.painter.paint_primitives(
@@ -1444,7 +1447,7 @@ impl EguiRenderer {
             self.pixels_per_point,
             &clipped_primitives,
         );
-        for id in textures_delta.free.drain(..) {
+        for id in textures_delta.free.drain() {
             self.painter.free_texture(id);
         }
     }
@@ -2169,17 +2172,22 @@ mod tests {
     fn egui_repaint_request_survives_its_own_pass() {
         let ctx = egui::Context::default();
         // Let egui finish its initial immediate repaints before requesting a delay.
+        // This headless test intentionally discards texture updates without painting.
         for _ in 0..2 {
-            let _ = ctx.run_ui(Default::default(), |_| {});
+            ctx.run_ui(Default::default(), |_| {})
+                .textures_delta
+                .clear();
         }
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         ctx.set_request_repaint_callback(move |request| {
             captured.lock().unwrap().push(request);
         });
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        ctx.run_ui(Default::default(), |ui| {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
-        });
+        })
+        .textures_delta
+        .clear();
         let request = *requests.lock().unwrap().last().unwrap();
         assert!(!request.delay.is_zero());
         assert_eq!(
@@ -2193,7 +2201,9 @@ mod tests {
             (ControlFlow::WaitUntil(now + request.delay), false)
         );
 
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
         assert_eq!(
             schedule_repaint(ControlFlow::Wait, request, ctx.cumulative_pass_nr(), now),
             (ControlFlow::Wait, false)
@@ -2216,7 +2226,8 @@ mod tests {
         let mut size = egui::Vec2::ZERO;
         let mut elided = false;
         let mut final_character = None;
-        let _ = ctx.run_ui(Default::default(), |ui| {
+        // Layout is tested without a GPU, so texture updates are intentionally discarded.
+        ctx.run_ui(Default::default(), |ui| {
             let galley = super::layout_elided(
                 ui.painter(),
                 "CefSharp.BrowserSubprocess.exe",
@@ -2231,7 +2242,9 @@ mod tests {
                 .last()
                 .and_then(|row| row.row.glyphs.last())
                 .map(|glyph| glyph.chr);
-        });
+        })
+        .textures_delta
+        .clear();
 
         assert!(elided);
         assert_eq!(final_character, Some('…'));

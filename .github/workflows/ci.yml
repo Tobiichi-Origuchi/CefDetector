@@ -29,8 +29,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.92.0
-        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: clippy,rustfmt
 
@@ -90,8 +90,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.92.0
-        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: clippy
 
@@ -161,8 +161,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.92.0
-        uses: dtolnay/rust-toolchain@387aeee55b189f024a4f6d94890c5b18d73339cc # 1.92.0
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: clippy
 

@@ -125,7 +125,7 @@ Summary:
 
 由于只有虚拟机，而且虚拟机中的 CEF 软件数量太少，测试结果没有代表性，如果有好心人愿意测试，可以：
 
-1. 安装 rust toolchain 1.92.0-x86_64-pc-windows-msvc
+1. 安装 rust toolchain stable-x86_64-pc-windows-msvc
 2. 运行 `pwsh -NoProfile -File .\benchmark.ps1`
 3. 将结果发在 issue
 
@@ -133,7 +133,7 @@ Summary:
 
 由于只有虚拟机，而且虚拟机中的 CEF 软件数量太少，测试结果没有代表性，如果有好心人愿意测试，可以：
 
-1. 安装 rust toolchain 1.92.0-aarch64-apple-darwin
+1. 安装 rust toolchain stable-aarch64-apple-darwin
 2. 运行 `./benchmark-macos.sh`
 3. 将结果发在 issue
 
