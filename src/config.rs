@@ -1227,6 +1227,7 @@ impl Default for PackageQueryConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct CliConfig {
     pub pretty: bool,
+    pub native_paths: bool,
     pub sort_by: SortKey,
     pub sort_order: SortOrder,
     pub overwrite: bool,
@@ -1237,6 +1238,7 @@ impl Default for CliConfig {
     fn default() -> Self {
         Self {
             pretty: true,
+            native_paths: false,
             sort_by: SortKey::Path,
             sort_order: SortOrder::Ascending,
             overwrite: true,
@@ -3067,6 +3069,45 @@ mod tests {
         assert_eq!(loaded.config.search.backend, SearchBackend::Auto);
         assert_eq!(loaded.config.search.exclude_directory_names, ["second"]);
         assert_eq!(loaded.sources.len(), 2);
+    }
+
+    #[test]
+    fn cli_native_paths_defaults_and_overrides_follow_configuration_layers() {
+        let enabled = TempConfig::new("[cli]\nnative_paths = true\n");
+        let disabled = TempConfig::new("[cli]\nnative_paths = false\n");
+        for loader in [load, load_for_cli] {
+            let mut options = LoadOptions {
+                no_system: true,
+                no_user: true,
+                ..Default::default()
+            };
+            assert!(!loader(&options).unwrap().config.cli.native_paths);
+            options.explicit_files.push(enabled.0.clone());
+            assert!(loader(&options).unwrap().config.cli.native_paths);
+            options.explicit_files.push(disabled.0.clone());
+            assert!(!loader(&options).unwrap().config.cli.native_paths);
+            options.overrides.push("cli.native_paths=true".into());
+            let loaded = loader(&options).unwrap();
+            assert!(loaded.config.cli.native_paths);
+            let output = format_effective(&loaded).unwrap();
+            let decoded: AppConfig = toml::from_str(&output).unwrap();
+            assert_eq!(decoded, loaded.config);
+            options.overrides.push("cli.native_paths=false".into());
+            assert!(!loader(&options).unwrap().config.cli.native_paths);
+        }
+    }
+
+    #[test]
+    fn invalid_cli_native_paths_types_report_their_source() {
+        for literal in ["'true'", "1", "1.5", "[]", "{}"] {
+            let message = file_error(&format!("[cli]\nnative_paths = {literal}\n"));
+            assert!(message.contains("native_paths"), "{message}");
+            assert_eq!(marked_fragment(&message), literal, "{message}");
+            let message = override_error(&format!("cli.native_paths={literal}"));
+            assert!(message.contains("<command line>"), "{message}");
+            assert!(message.contains("native_paths"), "{message}");
+            assert_eq!(marked_fragment(&message), literal, "{message}");
+        }
     }
 
     #[test]

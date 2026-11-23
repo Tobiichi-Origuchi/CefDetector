@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::{self, AppConfig, CliConfig, LoadOptions, SortKey, SortOrder};
 use crate::models::AppInfo;
@@ -271,7 +271,34 @@ fn push_json_string(output: &mut String, value: &str) {
     output.push('"');
 }
 
-fn format_json(results: &[AppInfo], pretty: bool) -> String {
+fn native_path_metadata(path: &Path, enabled: bool) -> Option<(&'static str, String)> {
+    if !enabled || path.to_str().is_some() {
+        return None;
+    }
+
+    let mut raw = String::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for byte in path.as_os_str().as_bytes() {
+            write!(raw, "{byte:02x}").unwrap();
+        }
+        Some(("unix-bytes-hex", raw))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        for unit in path.as_os_str().encode_wide() {
+            write!(raw, "{unit:04x}").unwrap();
+        }
+        Some(("windows-utf16-hex", raw))
+    }
+}
+
+fn format_json(results: &[AppInfo], config: &CliConfig) -> String {
+    let pretty = config.pretty;
     let mut output = String::from("[");
     for (index, result) in results.iter().enumerate() {
         if index > 0 {
@@ -292,18 +319,33 @@ fn format_json(results: &[AppInfo], pretty: bool) -> String {
         if pretty {
             write!(
                 output,
-                ",\n    \"size\": {},\n    \"is_running\": {},\n    \"is_dir\": {}\n  }}",
+                ",\n    \"size\": {},\n    \"is_running\": {},\n    \"is_dir\": {}",
                 result.size, result.is_running, result.is_dir
             )
             .unwrap();
         } else {
             write!(
                 output,
-                ",\"size\":{},\"is_running\":{},\"is_dir\":{}}}",
+                ",\"size\":{},\"is_running\":{},\"is_dir\":{}",
                 result.size, result.is_running, result.is_dir
             )
             .unwrap();
         }
+        if let Some((encoding, raw)) = native_path_metadata(&result.file, config.native_paths) {
+            output.push_str(if pretty {
+                ",\n    \"file_raw_encoding\": "
+            } else {
+                ",\"file_raw_encoding\":"
+            });
+            push_json_string(&mut output, encoding);
+            output.push_str(if pretty {
+                ",\n    \"file_raw\": "
+            } else {
+                ",\"file_raw\":"
+            });
+            push_json_string(&mut output, &raw);
+        }
+        output.push_str(if pretty { "\n  }" } else { "}" });
     }
     if pretty && !results.is_empty() {
         output.push('\n');
@@ -345,7 +387,7 @@ fn push_csv_field(output: &mut String, value: &str) {
 
 fn format_results(results: &[AppInfo], format: OutputFormat, config: &CliConfig) -> String {
     match format {
-        OutputFormat::Json => format_json(results, config.pretty),
+        OutputFormat::Json => format_json(results, config),
         OutputFormat::Toml => {
             let mut output = String::new();
             for result in results {
@@ -358,10 +400,21 @@ fn format_results(results: &[AppInfo], format: OutputFormat, config: &CliConfig)
                 push_toml_string(&mut output, &result.app_type);
                 write!(
                     output,
-                    "\nsize{separator}{}\nis_running{separator}{}\nis_dir{separator}{}\n",
+                    "\nsize{separator}{}\nis_running{separator}{}\nis_dir{separator}{}",
                     result.size, result.is_running, result.is_dir
                 )
                 .unwrap();
+                if let Some((encoding, raw)) =
+                    native_path_metadata(&result.file, config.native_paths)
+                {
+                    output.push_str("\nfile_raw_encoding");
+                    output.push_str(separator);
+                    push_toml_string(&mut output, encoding);
+                    output.push_str("\nfile_raw");
+                    output.push_str(separator);
+                    push_toml_string(&mut output, &raw);
+                }
+                output.push('\n');
                 if config.pretty {
                     output.push('\n');
                 }
@@ -372,22 +425,40 @@ fn format_results(results: &[AppInfo], format: OutputFormat, config: &CliConfig)
             let delimiter = config.csv.delimiter;
             let mut output = String::new();
             if config.csv.header {
-                writeln!(
+                write!(
                     output,
                     "file{delimiter}app_type{delimiter}size{delimiter}is_running{delimiter}is_dir"
                 )
                 .unwrap();
+                if config.native_paths {
+                    for field in ["file_raw_encoding", "file_raw"] {
+                        output.push(delimiter);
+                        push_csv_field(&mut output, field);
+                    }
+                }
+                output.push('\n');
             }
             for result in results {
                 push_csv_field(&mut output, &result.file.to_string_lossy());
                 output.push(delimiter);
                 push_csv_field(&mut output, &result.app_type);
-                writeln!(
+                write!(
                     output,
                     "{delimiter}{}{delimiter}{}{delimiter}{}",
                     result.size, result.is_running, result.is_dir
                 )
                 .unwrap();
+                if config.native_paths {
+                    output.push(delimiter);
+                    if let Some((encoding, raw)) = native_path_metadata(&result.file, true) {
+                        push_csv_field(&mut output, encoding);
+                        output.push(delimiter);
+                        push_csv_field(&mut output, &raw);
+                    } else {
+                        output.push(delimiter);
+                    }
+                }
+                output.push('\n');
             }
             output
         }
@@ -555,7 +626,7 @@ mod tests {
 
     use super::{
         Action, CliOptions, ConfigCommand, OutputFormat, extract_config_options, format_json,
-        format_results, parse_arguments, push_json_string,
+        format_results, native_path_metadata, parse_arguments, push_json_string,
     };
     use crate::config::CliConfig;
     use crate::models::AppInfo;
@@ -734,7 +805,7 @@ mod tests {
                 is_running: true,
                 is_dir: false,
             }],
-            true,
+            &CliConfig::default(),
         );
         assert_eq!(
             output,
@@ -761,6 +832,159 @@ mod tests {
         assert_eq!(toml["app"][0]["file"].as_str(), Some(display.as_ref()));
         let csv = format_results(&results, OutputFormat::Csv, &config);
         assert!(csv.contains(&format!("\"{display}\",\"CEF\",42,false,false\n")));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn raw_path_metadata_round_trips_native_units() {
+        #[cfg(unix)]
+        let (path, expected_encoding, expected_raw) = {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            (
+                PathBuf::from(OsString::from_vec(vec![
+                    0, 1, 0x7f, 0x80, 0xc0, 0xe2, 0xff, b'/', b'"', b'\n', b'a',
+                ])),
+                "unix-bytes-hex",
+                "00017f80c0e2ff2f220a61",
+            )
+        };
+        #[cfg(windows)]
+        let (path, expected_encoding, expected_raw) = {
+            use std::os::windows::ffi::OsStringExt as _;
+
+            (
+                PathBuf::from(OsString::from_wide(&[
+                    0, 1, 0x7f, 0x80, 0x1234, 0xd800, 0xdc00, 0xdc01, 0x61, 0xffff,
+                ])),
+                "windows-utf16-hex",
+                "00000001007f00801234d800dc00dc010061ffff",
+            )
+        };
+        assert!(path.to_str().is_none());
+        assert_eq!(native_path_metadata(&path, false), None);
+        let (encoding, raw) = native_path_metadata(&path, true).unwrap();
+        assert_eq!(encoding, expected_encoding);
+        assert_eq!(raw, expected_raw);
+
+        #[cfg(unix)]
+        let restored = {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            OsString::from_vec(
+                raw.as_bytes()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                    .collect(),
+            )
+        };
+        #[cfg(windows)]
+        let restored = {
+            use std::os::windows::ffi::OsStringExt as _;
+
+            let units: Vec<_> = raw
+                .as_bytes()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|unit| u16::from_str_radix(std::str::from_utf8(unit).unwrap(), 16).unwrap())
+                .collect();
+            OsString::from_wide(&units)
+        };
+        assert_eq!(restored, path.as_os_str());
+    }
+
+    #[test]
+    fn unicode_paths_do_not_add_raw_metadata() {
+        for file in ["", "/ASCII/app", "C:\\中文\\😀�,\"\n\t.exe"] {
+            let results = [AppInfo {
+                file: file.into(),
+                app_type: "CEF".into(),
+                size: 42,
+                is_running: false,
+                is_dir: false,
+            }];
+            assert_eq!(native_path_metadata(&results[0].file, true), None);
+            for pretty in [false, true] {
+                let mut config = CliConfig {
+                    pretty,
+                    ..Default::default()
+                };
+                for format in [OutputFormat::Json, OutputFormat::Toml] {
+                    let before = format_results(&results, format, &config);
+                    config.native_paths = true;
+                    assert_eq!(format_results(&results, format, &config), before);
+                    config.native_paths = false;
+                }
+            }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_path_output_preserves_text_and_adds_metadata() {
+        let native = PathBuf::from(non_unicode_argument());
+        let display = native.to_string_lossy().into_owned();
+        let (encoding, raw) = native_path_metadata(&native, true).unwrap();
+        let results = [native, PathBuf::from(&display)].map(|file| AppInfo {
+            file,
+            app_type: "CEF".into(),
+            size: 42,
+            is_running: false,
+            is_dir: false,
+        });
+        for pretty in [false, true] {
+            let mut config = CliConfig {
+                pretty,
+                native_paths: true,
+                ..Default::default()
+            };
+            let json = format_results(&results, OutputFormat::Json, &config);
+            let separator = if pretty { ": " } else { ":" };
+            assert_eq!(json.matches("\"file_raw_encoding\"").count(), 1);
+            assert_eq!(json.matches("\"file_raw\"").count(), 1);
+            assert!(json.contains(&format!("\"file_raw_encoding\"{separator}\"{encoding}\"")));
+            assert!(json.contains(&format!("\"file_raw\"{separator}\"{raw}\"")));
+
+            let output = format_results(&results, OutputFormat::Toml, &config);
+            let toml: toml::Value = toml::from_str(&output).unwrap();
+            assert_eq!(toml["app"][0]["file"].as_str(), Some(display.as_str()));
+            assert_eq!(toml["app"][0]["file_raw_encoding"].as_str(), Some(encoding));
+            assert_eq!(toml["app"][0]["file_raw"].as_str(), Some(raw.as_str()));
+            assert_eq!(toml["app"][0].as_table().unwrap().len(), 7);
+            assert_eq!(toml["app"][1]["file"].as_str(), Some(display.as_str()));
+            assert_eq!(toml["app"][1].as_table().unwrap().len(), 5);
+
+            for delimiter in [',', ';', '\t', '-', '中', 'c', 'w', 'o'] {
+                config.csv.delimiter = delimiter;
+                for header in [false, true] {
+                    config.csv.header = header;
+                    let expected_header = if header {
+                        format!(
+                            "file{delimiter}app_type{delimiter}size{delimiter}is_running{delimiter}is_dir{delimiter}\"file_raw_encoding\"{delimiter}\"file_raw\"\n"
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let mut expected = expected_header.clone();
+                    expected.push_str(&format!(
+                        "\"{display}\"{delimiter}\"CEF\"{delimiter}42{delimiter}false{delimiter}false{delimiter}\"{encoding}\"{delimiter}\"{raw}\"\n\"{display}\"{delimiter}\"CEF\"{delimiter}42{delimiter}false{delimiter}false{delimiter}{delimiter}\n"
+                    ));
+                    assert_eq!(
+                        format_results(&results, OutputFormat::Csv, &config),
+                        expected
+                    );
+                    assert_eq!(
+                        format_results(&[], OutputFormat::Csv, &config),
+                        expected_header
+                    );
+                }
+            }
+            assert_eq!(format_results(&[], OutputFormat::Json, &config), "[]");
+            assert_eq!(format_results(&[], OutputFormat::Toml, &config), "");
+        }
     }
 
     #[test]
@@ -793,7 +1017,13 @@ mod tests {
             is_dir: false,
         }];
         assert_eq!(
-            format_json(&results, false),
+            format_json(
+                &results,
+                &CliConfig {
+                    pretty: false,
+                    ..Default::default()
+                }
+            ),
             "[{\"file\":\"/tmp/a,\\\"b\\n\",\"app_type\":\"CEF\",\"size\":42,\"is_running\":true,\"is_dir\":false}]"
         );
 

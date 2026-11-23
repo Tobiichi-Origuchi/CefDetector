@@ -365,6 +365,12 @@ max_output_bytes = 8388608
 [cli]
 # Pretty-print JSON and TOML.
 pretty = true
+# Include lossless metadata for non-Unicode paths. Does not change the file field.
+# JSON/TOML add file_raw_encoding and file_raw only for non-Unicode paths.
+# CSV always appends these two columns when enabled; Unicode rows leave them empty.
+# Unix: unix-bytes-hex, two lowercase hex digits per original byte.
+# Windows: windows-utf16-hex, four lowercase hex digits per UTF-16 code unit.
+native_paths = false
 # Result sort key: "size", "name", "type", "path", or "running".
 sort_by = "path"
 # Result sort order: "ascending" or "descending".
