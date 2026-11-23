@@ -95,6 +95,16 @@ fn checked_icns_family(bytes: &[u8]) -> Option<&[u8]> {
     Some(family)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn icns_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // Only inspect a canonical PNG signature and first IHDR chunk. Full format
+    // and checksum validation remain with the ICNS decoder.
+    let header = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")?;
+    let width = u32::from_be_bytes(header.get(..4)?.try_into().ok()?);
+    let height = u32::from_be_bytes(header.get(4..8)?.try_into().ok()?);
+    Some((width, height))
+}
+
 #[cfg(target_os = "macos")]
 fn decode_icns(bytes: &[u8]) -> Option<RawIcon> {
     // The parser allocates from element lengths before checking for truncated data.
@@ -107,6 +117,22 @@ fn decode_icns(bytes: &[u8]) -> Option<RawIcon> {
                 .pixel_width()
                 .saturating_mul(icon_type.pixel_height())
         })?;
+    if matches!(
+        icon_type.encoding(),
+        icns::Encoding::ARGB | icns::Encoding::JP2PNG
+    ) {
+        // Match get_icon_with_type's first-element lookup, including duplicates.
+        let element = family
+            .elements
+            .iter()
+            .find(|element| element.ostype == icon_type.ostype())?;
+        // icns checks these dimensions only after fully decoding the PNG.
+        if icns_png_dimensions(&element.data).is_some_and(|dimensions| {
+            dimensions != (icon_type.pixel_width(), icon_type.pixel_height())
+        }) {
+            return None;
+        }
+    }
     let image = family.get_icon_with_type(icon_type).ok()?;
     let mut png = Vec::new();
     image.write_png(&mut png).ok()?;
@@ -1221,6 +1247,41 @@ mod input_tests {
     }
 
     #[test]
+    fn icns_png_header_reads_dimensions_without_decoding() {
+        for (width, height) in [(32_u32, 32_u32), (256, 512), (2048, 2048), (u32::MAX, 1)] {
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.extend_from_slice(&13_u32.to_be_bytes());
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&width.to_be_bytes());
+            bytes.extend_from_slice(&height.to_be_bytes());
+            // No image payload is needed to reject inconsistent dimensions.
+            assert_eq!(icns_png_dimensions(&bytes), Some((width, height)));
+            bytes.extend_from_slice(b"remaining data is checked by the full decoder");
+            assert_eq!(icns_png_dimensions(&bytes), Some((width, height)));
+        }
+    }
+
+    #[test]
+    fn icns_png_header_leaves_other_and_incomplete_data_to_decoder() {
+        let bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\x01\0\0\0\x01\0";
+        for length in 0..bytes.len() {
+            assert_eq!(icns_png_dimensions(&bytes[..length]), None, "{length}");
+        }
+        for position in [0, 8, 11, 12, 15] {
+            let mut invalid = bytes.to_vec();
+            invalid[position] ^= 1;
+            assert_eq!(icns_png_dimensions(&invalid), None, "{position}");
+        }
+        for data in [
+            b"ARGB".as_slice(),
+            b"\0\0\0\x0cjP  \r\n\x87\n",
+            b"raw icon data",
+        ] {
+            assert_eq!(icns_png_dimensions(data), None);
+        }
+    }
+
+    #[test]
     fn icns_length_checks_reject_truncated_and_oversized_elements() {
         for length in 0..8 {
             assert!(checked_icns_family(&b"icns\0\0\0\x08"[..length]).is_none());
@@ -1799,7 +1860,101 @@ Icon=wrong-icon\n";
 mod macos_tests {
     use std::fs;
 
-    use super::{RawIcon, try_icon_from_path};
+    use super::{RawIcon, decode_icns, icns_png_dimensions, try_icon_from_path};
+
+    fn encoded_png(size: u32) -> Vec<u8> {
+        let mut image = icns::Image::new(icns::PixelFormat::RGBA, size, size);
+        for pixel in image.data_mut().as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[20, 100, 220, 128]);
+        }
+        let mut bytes = Vec::new();
+        image.write_png(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn encoded_family(elements: Vec<icns::IconElement>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        icns::IconFamily { elements }.write(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn icns_png_precheck_preserves_first_duplicate_and_retina_dimensions() {
+        for icon_type in [
+            icns::IconType::RGBA32_32x32,
+            icns::IconType::RGBA32_256x256,
+            icns::IconType::RGBA32_256x256_2x,
+        ] {
+            let valid = encoded_png(icon_type.pixel_width());
+            let invalid = encoded_png(icon_type.pixel_width() + 1);
+            let single = encoded_family(vec![icns::IconElement::new(
+                icon_type.ostype(),
+                valid.clone(),
+            )]);
+            let Some(RawIcon::PngOrIco(expected)) = decode_icns(&single) else {
+                panic!("valid ICNS PNG was rejected: {icon_type:?}");
+            };
+            for valid_first in [false, true] {
+                let entries = if valid_first {
+                    [valid.clone(), invalid.clone()]
+                } else {
+                    [invalid.clone(), valid.clone()]
+                };
+                let family = encoded_family(
+                    entries
+                        .into_iter()
+                        .map(|data| icns::IconElement::new(icon_type.ostype(), data))
+                        .collect(),
+                );
+                let actual = decode_icns(&family);
+                if valid_first {
+                    let Some(RawIcon::PngOrIco(actual)) = actual else {
+                        panic!("first valid duplicate was rejected: {icon_type:?}");
+                    };
+                    assert_eq!(actual, expected, "{icon_type:?}");
+                } else {
+                    assert!(actual.is_none(), "{icon_type:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icns_png_precheck_only_checks_the_selected_icon() {
+        let family = encoded_family(vec![
+            icns::IconElement::new(icns::IconType::RGBA32_32x32.ostype(), encoded_png(64)),
+            icns::IconElement::new(icns::IconType::RGBA32_256x256.ostype(), encoded_png(256)),
+        ]);
+        assert!(matches!(decode_icns(&family), Some(RawIcon::PngOrIco(_))));
+    }
+
+    #[test]
+    fn icns_png_precheck_keeps_non_png_encoding_with_png_like_payload() {
+        let mut data = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        data.extend_from_slice(&2048_u32.to_be_bytes());
+        data.extend_from_slice(&2048_u32.to_be_bytes());
+        data.resize(128, 0);
+        assert_eq!(icns_png_dimensions(&data), Some((2048, 2048)));
+        let family = encoded_family(vec![
+            icns::IconElement::new(icns::IconType::Palette4_16x16.ostype(), data),
+            icns::IconElement::new(icns::IconType::MonoA_16x16.ostype(), vec![255; 64]),
+        ]);
+        assert!(matches!(decode_icns(&family), Some(RawIcon::PngOrIco(_))));
+    }
+
+    #[test]
+    fn icns_png_precheck_keeps_full_png_validation() {
+        for icon_type in [icns::IconType::RGBA32_32x32, icns::IconType::RGBA32_256x256] {
+            let mut data = encoded_png(icon_type.pixel_width());
+            *data.last_mut().unwrap() ^= 1;
+            assert_eq!(
+                icns_png_dimensions(&data),
+                Some((icon_type.pixel_width(), icon_type.pixel_height()))
+            );
+            let family = encoded_family(vec![icns::IconElement::new(icon_type.ostype(), data)]);
+            assert!(decode_icns(&family).is_none());
+        }
+    }
 
     #[test]
     fn icns_is_decoded_to_png_for_the_existing_gui_pipeline() {
