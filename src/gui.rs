@@ -27,7 +27,7 @@ use crate::config::LinuxDisplay;
 use crate::config::SystemFontQueryConfig;
 use crate::config::{
     AppConfig, BackgroundFit, CardField, ClickAction, FontMode, GraphicsApi, HorizontalAlign,
-    RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
+    IconConfig, RgbaColor, ScrollbarMode, SortKey, SortOrder, TextureFilter,
 };
 use crate::icon_finder::{RawIcon, configured_fallback_icon, get_app_icon};
 use crate::search::core_search;
@@ -161,18 +161,15 @@ impl Frontend {
         let background = load_texture(
             ctx,
             "background",
-            decode_raster(&background_bytes, false, u32::MAX)
+            decode_raster(&background_bytes, false, u32::MAX, None)
                 .ok_or_else(|| GuiError("configured background image is invalid".into()))?,
             texture_options(config.gui.background.filter),
         );
         let default_icon = load_texture(
             ctx,
             "default-cef-icon",
-            decode_icon(
-                &configured_fallback_icon(&config.icons),
-                config.icons.decode_max_size,
-            )
-            .unwrap_or_else(|| ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0])),
+            decode_icon(&configured_fallback_icon(&config.icons), &config.icons)
+                .unwrap_or_else(|| ColorImage::from_rgba_unmultiplied([1, 1], &[0, 0, 0, 0])),
             TextureOptions::LINEAR,
         );
 
@@ -264,7 +261,7 @@ impl Frontend {
             return texture.clone();
         }
 
-        let texture = decode_icon(raw, self.config.icons.decode_max_size)
+        let texture = decode_icon(raw, &self.config.icons)
             .map(|image| {
                 load_texture(
                     ctx,
@@ -960,16 +957,36 @@ fn load_texture(
     ctx.load_texture(name, image, options)
 }
 
-fn decode_icon(raw: &RawIcon, max_size: u32) -> Option<ColorImage> {
+fn decode_icon(raw: &RawIcon, config: &IconConfig) -> Option<ColorImage> {
     match raw {
-        RawIcon::Svg(bytes) => decode_svg(bytes, max_size),
-        RawIcon::PngOrIco(bytes) => decode_raster(bytes, true, max_size),
+        RawIcon::Svg(bytes) => decode_svg(bytes, config.decode_max_size),
+        RawIcon::PngOrIco(bytes) => decode_raster(
+            bytes,
+            true,
+            config.decode_max_size,
+            Some(config.max_raster_decode_bytes),
+        ),
         RawIcon::Empty => None,
     }
 }
 
-fn decode_raster(bytes: &[u8], thumbnail: bool, max_size: u32) -> Option<ColorImage> {
-    let mut image = image::load_from_memory(bytes).ok()?;
+fn decode_raster(
+    bytes: &[u8],
+    thumbnail: bool,
+    max_size: u32,
+    maximum: Option<u64>,
+) -> Option<ColorImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    if let Some(maximum) = maximum {
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(maximum);
+        reader.limits(limits);
+    }
+    // ImageReader checks the decoded output size before allocating its pixel buffer.
+    // Decoder internals are limited on a best-effort basis, not by a total RSS cap.
+    let mut image = reader.decode().ok()?;
     if thumbnail && (image.width() > max_size || image.height() > max_size) {
         image = image.thumbnail(max_size, max_size);
     }
@@ -1941,8 +1958,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ControlFlow, TextRole, configure_custom_fonts, consume_repaint_deadline, decode_svg,
-        format_size, schedule_repaint, scroll_from_thumb_drag, title_font_size,
+        ControlFlow, TextRole, configure_custom_fonts, consume_repaint_deadline, decode_icon,
+        decode_raster, decode_svg, format_size, schedule_repaint, scroll_from_thumb_drag,
+        title_font_size,
     };
 
     // APFS rejects the non-UTF-8 fixture names used by this test.
@@ -2018,6 +2036,144 @@ mod tests {
                     break;
                 }
                 super::SearchMessage::Failed(error) => panic!("search failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn raster_icon_budget_is_applied_before_thumbnailing() {
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Ico,
+            image::ImageFormat::WebP,
+        ] {
+            let bytes = encoded_raster(format, 256);
+            assert!(bytes.len() < 8 * 1024 * 1024);
+            let raw = crate::icon_finder::RawIcon::PngOrIco(bytes.clone().into());
+            let source_bytes = 256 * 256 * 4;
+            for (maximum, accepted) in [
+                (source_bytes - 1, false),
+                (source_bytes, true),
+                (source_bytes + 1, true),
+            ] {
+                let config = crate::config::IconConfig {
+                    max_raster_decode_bytes: maximum,
+                    ..Default::default()
+                };
+                let decoded = decode_icon(&raw, &config);
+                assert_eq!(decoded.is_some(), accepted, "{format:?}, {maximum}");
+                if let Some(image) = decoded {
+                    assert_eq!(image.size, [64, 64]);
+                    assert!(image.pixels.iter().all(|pixel| {
+                        *pixel == egui::Color32::from_rgba_unmultiplied(20, 100, 220, 128)
+                    }));
+                }
+            }
+            // Backgrounds keep image's default limits and are not thumbnailed.
+            let background = decode_raster(&bytes, false, u32::MAX, None).unwrap();
+            assert_eq!(background.size, [256, 256]);
+        }
+    }
+
+    fn encoded_raster(format: image::ImageFormat, size: u32) -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(size, size, image::Rgba([20, 100, 220, 128]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut bytes, format)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn raster_icon_budget_counts_native_high_bit_depth_pixels() {
+        let image =
+            image::ImageBuffer::from_pixel(256, 256, image::Rgba([5000_u16, 25000, 55000, 32768]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba16(image)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        let raw = crate::icon_finder::RawIcon::PngOrIco(bytes.clone().into());
+        let mut config = crate::config::IconConfig {
+            max_raster_decode_bytes: 256 * 256 * 4,
+            ..Default::default()
+        };
+        assert!(decode_icon(&raw, &config).is_none());
+        config.max_raster_decode_bytes = 256 * 256 * 8;
+        let decoded = decode_icon(&raw, &config).unwrap();
+        let legacy = decode_raster(&bytes, true, config.decode_max_size, None).unwrap();
+        assert_eq!(decoded.size, legacy.size);
+        assert_eq!(decoded.pixels, legacy.pixels);
+    }
+
+    #[test]
+    fn raster_icon_budget_does_not_apply_to_svg_icons() {
+        let raw = crate::icon_finder::RawIcon::Svg(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#.as_slice().into(),
+        );
+        let config = crate::config::IconConfig {
+            max_raster_decode_bytes: 1,
+            ..Default::default()
+        };
+        let image = decode_icon(&raw, &config).unwrap();
+        assert_eq!(image.size, [64, 64]);
+        assert!(
+            image
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == egui::Color32::RED)
+        );
+    }
+
+    #[test]
+    fn raster_icon_budget_preserves_fallback_behavior() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(
+            std::env::temp_dir().join(format!("cefdetector-raster-budget-{}", std::process::id())),
+        );
+        std::fs::create_dir(&root.0).unwrap();
+        let fallback = root.0.join("fallback.png");
+        std::fs::write(&fallback, encoded_raster(image::ImageFormat::Png, 32)).unwrap();
+        let raw = crate::icon_finder::RawIcon::PngOrIco(
+            encoded_raster(image::ImageFormat::Png, 512).into(),
+        );
+        for (maximum, expected_size) in [(256 * 256 * 4, [32, 32]), (1, [1, 1])] {
+            let mut config = crate::config::AppConfig::default();
+            config.search.backend = crate::config::SearchBackend::Filesystem;
+            config.search.roots = Some(vec![root.0.clone()]);
+            config.search.use_platform_excludes = false;
+            config.icons.fallback_path = Some(fallback.clone());
+            config.icons.max_raster_decode_bytes = maximum;
+            let ctx = egui::Context::default();
+            let mut frontend = super::Frontend::new(&ctx, Arc::new(config)).unwrap();
+            assert_eq!(frontend.default_icon.size(), expected_size);
+            assert_eq!(
+                frontend.texture_for_icon(&ctx, &raw).id(),
+                frontend.default_icon.id()
+            );
+            assert!(frontend.background.size().iter().all(|side| *side > 1));
+            if maximum == 1 {
+                let mut delta = ctx.tex_manager().write().take_delta();
+                let updates = delta.set.remove(&frontend.default_icon.id());
+                delta.clear();
+                let updates = updates.unwrap();
+                let image = &updates[0].image;
+                let egui::ImageData::Color(image) = image;
+                assert_eq!(image.pixels, [egui::Color32::TRANSPARENT]);
+            }
+            // Wait for the controlled empty scan before removing its root.
+            match frontend
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap()
+            {
+                super::SearchMessage::Done { count, .. } => assert_eq!(count, 0),
+                _ => panic!("unexpected search result in empty fixture"),
             }
         }
     }

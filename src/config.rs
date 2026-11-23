@@ -1114,6 +1114,8 @@ pub struct IconConfig {
     pub max_pe_icon_bytes: u64,
     #[serde(deserialize_with = "deserialize_pe_file_bytes")]
     pub max_pe_file_bytes: u64,
+    #[serde(deserialize_with = "deserialize_raster_decode_bytes")]
+    pub max_raster_decode_bytes: u64,
     pub decode_max_size: u32,
     pub fallback_path: Option<PathBuf>,
     pub sources: Vec<IconSource>,
@@ -1137,6 +1139,14 @@ where
     Ok(bytes.clamp(1, 4 * 1024 * 1024 * 1024) as u64)
 }
 
+fn deserialize_raster_decode_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = i64::deserialize(deserializer)?;
+    Ok(bytes.clamp(1, 512 * 1024 * 1024) as u64)
+}
+
 impl Default for IconConfig {
     fn default() -> Self {
         Self {
@@ -1145,6 +1155,7 @@ impl Default for IconConfig {
             max_appimage_icon_bytes: 8 * 1024 * 1024,
             max_pe_icon_bytes: 8 * 1024 * 1024,
             max_pe_file_bytes: 256 * 1024 * 1024,
+            max_raster_decode_bytes: 64 * 1024 * 1024,
             decode_max_size: 64,
             fallback_path: None,
             sources: vec![
@@ -3270,6 +3281,12 @@ mod tests {
                 "invalid type",
             ),
             (
+                "icons.max_raster_decode_bytes='64MiB'",
+                "icons.max_raster_decode_bytes=67108864",
+                "'64MiB'",
+                "invalid type",
+            ),
+            (
                 "gui.window.width=[",
                 "gui.window.width=800",
                 "[",
@@ -3724,12 +3741,61 @@ mod tests {
     }
 
     #[test]
+    fn raster_decode_byte_limit_defaults_and_clamps_in_files_and_overrides() {
+        let defaults = AppConfig::default().icons;
+        assert_eq!(defaults.max_raster_decode_bytes, 64 * 1024 * 1024);
+        for (input, expected) in [
+            ("-9223372036854775808", 1),
+            ("-1", 1),
+            ("0", 1),
+            ("1", 1),
+            ("16", 16),
+            ("67108863", 67108863),
+            ("67108864", 67108864),
+            ("67108865", 67108865),
+            ("536870911", 536870911),
+            ("536870912", 536870912),
+            ("536870913", 536870912),
+            ("9223372036854775807", 536870912),
+        ] {
+            let file = TempConfig::new(&format!("[icons]\nmax_raster_decode_bytes = {input}\n"));
+            for loader in [load, load_for_cli] {
+                for options in [
+                    LoadOptions {
+                        no_system: true,
+                        no_user: true,
+                        explicit_files: vec![file.0.clone()],
+                        ..Default::default()
+                    },
+                    LoadOptions {
+                        no_system: true,
+                        no_user: true,
+                        overrides: vec![format!("icons.max_raster_decode_bytes={input}")],
+                        ..Default::default()
+                    },
+                ] {
+                    let loaded = loader(&options).unwrap();
+                    let mut expected_icons = defaults.clone();
+                    expected_icons.max_raster_decode_bytes = expected;
+                    assert_eq!(loaded.config.icons, expected_icons, "{input}");
+                    assert!(
+                        format_effective(&loaded)
+                            .unwrap()
+                            .contains(&format!("max_raster_decode_bytes = {expected}\n"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn invalid_icon_file_byte_limits_report_source_diagnostics() {
         for field in [
             "max_file_bytes",
             "max_appimage_icon_bytes",
             "max_pe_icon_bytes",
             "max_pe_file_bytes",
+            "max_raster_decode_bytes",
         ] {
             for value in [
                 "'8MiB'",
